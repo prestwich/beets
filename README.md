@@ -8,7 +8,7 @@ and made the design decisions.
 
 ## Top-line performance
 
-Check `perf.md` for more information, but `beets` is comparable-to or
+Check `perf.md` for more information. `beets` is comparable-to or
 better-than `std::collections::BTreeMap`. This is not exactly apples-to-apples,
 as the `std` structure is a B-tree rather than a B+tree.
 
