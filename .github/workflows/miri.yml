@@ -1,0 +1,25 @@
+name: Miri
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Run tests under Miri
+        env:
+          # Proptests are orders of magnitude slower under Miri; a few cases
+          # per property keeps the run under the job timeout.
+          PROPTEST_CASES: '8'
+        run: cargo miri test --all-features

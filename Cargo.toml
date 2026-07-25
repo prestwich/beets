@@ -1,0 +1,37 @@
+[package]
+name = "beets"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "A B+Tree, written in Extremely Unsafe rust"
+authors = ["James Prestwich <james@prestwi.ch>"]
+repository = "https://github.com/prestwich/beets"
+readme = "README.md"
+keywords = ["btree", "b-plus-tree", "collections", "no-std"]
+categories = ["data-structures", "no-std"]
+exclude = [".github/", "benches/cpp/", "proptest-regressions/", "perf.md", "CLAUDE.md"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.8.2"
+proptest = "1.11.0"
+sweep-bptree = "0.4.1"
+
+[[bench]]
+name = "vs_btreemap"
+harness = false
+
+[[bench]]
+name = "blocked_insert"
+harness = false
+
+[features]
+default = ["std"]
+std = []
+
+# Line tables for profilers (samply / cargo-flamegraph): lets samples map
+# back to source through the heavy inlining. No runtime cost.
+[profile.bench]
+debug = true
