@@ -1006,7 +1006,8 @@ mod tests {
         let left = Node::from_inner(inner_with_children(2, 0, &live), &mut Global);
         let right = Node::from_inner(inner_with_children(2, 100, &live), &mut Global);
 
-        let root = Node::from_inner(Inner::test_from_parts(vec![100], vec![left, right]), &mut Global);
+        let root =
+            Node::from_inner(Inner::test_from_parts(vec![100], vec![left, right]), &mut Global);
         assert_eq!(live.load(Relaxed), 4, "one live value per grandchild before teardown");
 
         // SAFETY: `root` roots an inner of inners of leaves (height 2) and

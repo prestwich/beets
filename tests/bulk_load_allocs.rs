@@ -44,8 +44,14 @@ fn expected_nodes(n: usize) -> usize {
 #[test]
 fn bulk_load_allocates_exactly_the_trees_nodes() {
     // Sizes straddling every shape: empty, lone root leaf, ragged tails,
-    // exactly-full levels, and a three-level tree.
+    // exactly-full levels, and a three-level tree. Under Miri the
+    // three-level size is skipped: it costs minutes to interpret, and
+    // the deep load path is Miri-covered by the bulk loader's own
+    // tests; the alloc-count contract is scale-independent.
     for n in [0, 1, M - 1, M, M + 1, M * M, M * M + 1, M * M * M + 7] {
+        if cfg!(miri) && n >= M * M * M {
+            continue;
+        }
         let allocs_before = COUNTING.allocs();
         let frees_before = COUNTING.frees();
         let tree: BPlusTree<u64, u64, M, Global> =

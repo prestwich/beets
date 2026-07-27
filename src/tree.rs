@@ -1634,6 +1634,11 @@ mod tests {
     /// repairs at both the leaf and inner levels (`M² + 1`, `M³ + 1`).
     /// `check_tree` is the net: occupancy invariants, separator routing,
     /// leaf-chain integrity, and `len` bookkeeping.
+    ///
+    /// Under Miri the `m³` sizes are skipped: interpreting them costs
+    /// tens of minutes, and the deep build path is Miri-covered by
+    /// `bulk::tests::deep_cascade_loads_own_every_value_exactly_once`.
+    /// Regular CI runs the full list.
     #[test]
     fn from_sorted_iter_builds_valid_trees_at_awkward_sizes() {
         let m = M as u64;
@@ -1644,6 +1649,9 @@ mod tests {
             m * m * m, m * m * m + 1,
         ];
         for n in sizes {
+            if cfg!(miri) && n >= m * m * m {
+                continue;
+            }
             let tree: BPlusTree<u64, u64, M> =
                 BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
 

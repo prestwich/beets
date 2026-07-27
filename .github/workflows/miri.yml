@@ -17,9 +17,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
       - name: Run tests under Miri
         env:
           # Proptests are orders of magnitude slower under Miri; a few cases
           # per property keeps the run under the job timeout.
           PROPTEST_CASES: '8'
-        run: cargo miri test --all-features
+        # nextest runs one process per test, so tests interpret in
+        # parallel across the runner's cores.
+        run: cargo miri nextest run --all-features

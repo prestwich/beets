@@ -43,10 +43,6 @@
 // - perf: tune NODE_BUDGET empirically (benches/vs_btreemap.rs is the
 //   scoreboard); 512 is a guess. Sweep 256/512/1024/4096.
 
-// - perf: `clear`/`Drop` fast path under `Slabs` — when
-//   `!core::mem::needs_drop::<V>()` (const-folded per instantiation),
-//   skip the per-node walk and release slabs wholesale.
-
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
