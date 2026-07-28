@@ -8,14 +8,14 @@
 //! counter returns to zero (positive = leak, negative = double-drop).
 //! This lives in `tests/` because `catch_unwind` needs `std`.
 
-mod common;
+use crate::common;
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, atomic::AtomicIsize, atomic::Ordering::Relaxed},
 };
 
-use beets::BPlusTree;
+use crate::BPlusTree;
 use common::{Counted, M};
 
 /// Run a bulk load whose source panics just before yielding pair

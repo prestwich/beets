@@ -1,0 +1,28 @@
+[package]
+name = "beets-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+beets = { path = "..", features = ["testutils"] }
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false
+
+# The fuzz crate is its own workspace so `cargo` invocations at the repo
+# root never touch it.
+[workspace]
+
+# Line tables so crash stacks map back to source through the inlining.
+[profile.release]
+debug = 1

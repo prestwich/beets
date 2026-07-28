@@ -13,6 +13,7 @@ categories = ["data-structures", "no-std"]
 exclude = [".github/", "benches/cpp/", "proptest-regressions/", "perf.md", "CLAUDE.md"]
 
 [dependencies]
+arbitrary = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
@@ -30,6 +31,10 @@ harness = false
 [features]
 default = ["std"]
 std = []
+# Exposes the invariant net and the differential harness (`harness`
+# module) to external test drivers — the fuzz targets under fuzz/.
+# Not a public API: exempt from semver, never enable it in production.
+testutils = ["dep:arbitrary"]
 
 # Line tables for profilers (samply / cargo-flamegraph): lets samples map
 # back to source through the heavy inlining. No runtime cost.

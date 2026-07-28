@@ -1,7 +1,7 @@
 //! Shared fixtures for the integration pins: the u64 fanout, the
 //! counting pass-through allocator, the live-instance counter, and the
-//! standard fill traffic. Each test binary pulls this in with
-//! `mod common;` and uses its own subset.
+//! standard fill traffic. Mounted once from `lib.rs`; each
+//! integration-pin module uses its own subset.
 #![allow(dead_code)]
 
 use std::{
@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use beets::{BPlusTree, Key, NodeAllocator};
+use crate::{BPlusTree, Key, NodeAllocator};
 
 /// The u64 fanout. The crate const-asserts `M == K::FANOUT` at node
 /// construction, so a drifted value fails to build.
@@ -90,7 +90,6 @@ unsafe impl GlobalAlloc for Counting {
 
 /// Declare a pair of test-local counters and build a [`Counting`] over
 /// them. One macro call per test keeps parallel tests isolated.
-#[macro_export]
 macro_rules! counting {
     () => {{
         static ALLOCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -98,6 +97,7 @@ macro_rules! counting {
         $crate::common::Counting::new(&ALLOCS, &FREES)
     }};
 }
+pub(crate) use counting;
 
 /// A value that counts live instances: a leak leaves the counter
 /// positive, a double-drop drives it negative.

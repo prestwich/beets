@@ -5,7 +5,8 @@
 //! individual slots. When either condition fails, the walk (and every
 //! value drop it owes) must still happen.
 
-mod common;
+use crate::common;
+use crate::common::counting;
 
 use std::{
     alloc::System,
@@ -16,7 +17,7 @@ use std::{
     },
 };
 
-use beets::{BPlusTree, Inner, Leaf, Slabs, SlotAllocator};
+use crate::{BPlusTree, Inner, Leaf, Slabs, SlotAllocator};
 use common::{Counted, M, fill, v};
 
 /// The switch is an associated const — evaluable in const context, so

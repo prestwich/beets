@@ -4,14 +4,15 @@
 //! traffic actually flows through the supplied allocator's own
 //! `alloc`/`dealloc`.
 
-mod common;
+use crate::common;
+use crate::common::counting;
 
 use std::{
     alloc::System,
     sync::atomic::{AtomicUsize, Ordering::Relaxed},
 };
 
-use beets::{BPlusTree, NodeAllocator, Slabs, SlotAllocator};
+use crate::{BPlusTree, NodeAllocator, Slabs, SlotAllocator};
 use common::{Counting, M, fill, v};
 
 /// Compile-time half of the pin: `System` (a plain `GlobalAlloc`) must

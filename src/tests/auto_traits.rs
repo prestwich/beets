@@ -8,9 +8,9 @@
 //! `Send`-but-not-`Sync` constituent denies `Sync`) are pinned as
 //! `compile_fail` doctests on `BPlusTree` itself.
 
-mod common;
+use crate::common;
 
-use beets::{BPlusTree, Global, Slabs};
+use crate::{BPlusTree, Global, Slabs};
 use common::{M, fill, v};
 
 /// Compile-time pin: both stock allocator configurations yield a
