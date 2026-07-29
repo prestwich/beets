@@ -15,8 +15,10 @@
 //! in the leaf that convention routes to.
 
 use super::*;
-use crate::Global;
-use crate::test_util::{M, own, v};
+use crate::{
+    Global,
+    test_util::{M, own, v},
+};
 
 /// A full leaf holding the odd keys `1, 3, .., 2M-1`, so that sweeping the
 /// even keys `0, 2, .., 2M` lands a new key at every possible insertion

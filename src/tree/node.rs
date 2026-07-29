@@ -1,7 +1,9 @@
 use core::ptr::NonNull;
 
-use crate::allocator::{NodeAllocator, SlotAllocator};
-use crate::{Inner, Key, Leaf};
+use crate::{
+    Inner, Key, Leaf,
+    allocator::{NodeAllocator, SlotAllocator},
+};
 
 /// Debug-only node-kind tag. In debug builds it is the first field of both
 /// [`Leaf`] and [`Inner`] (which are `repr(C)` there), so the cast accessors on

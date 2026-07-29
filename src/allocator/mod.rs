@@ -24,3 +24,14 @@ pub use slab::Slabs;
 
 mod r#trait;
 pub use r#trait::{Global, NodeAllocator, SlotAllocator};
+
+/// One slot's storage. Which field is live is positional state (see the
+/// module invariants), mirroring the crate's untagged-[`Node`] discipline:
+/// LIVE slots hold `value`, FREE slots hold `next_free`, VIRGIN slots
+/// hold nothing.
+///
+/// [`Node`]: crate::Node
+pub(crate) union Slot<T> {
+    _value: core::mem::ManuallyDrop<T>,
+    next_free: Option<core::ptr::NonNull<Slot<T>>>,
+}

@@ -1,7 +1,9 @@
 use core::{mem::MaybeUninit, ptr::NonNull};
 
-use crate::allocator::{Global, NodeAllocator};
-use crate::{Inner, Key, Leaf, MAX_LEVELS};
+use crate::{
+    Inner, Key, Leaf, MAX_LEVELS,
+    allocator::{Global, NodeAllocator},
+};
 
 use super::{BPlusTree, Node};
 
@@ -257,18 +259,15 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> Descent<K, V, M
 }
 
 impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V, M, A> {
-    /// Descend from the root to the leaf whose range contains `key`,
-    /// recording the path — each visited inner node and the child index
-    /// routed through — in `path[h]` for every inner level `h`, and
-    /// returning the leaf. The shared front half of [`insert`](Self::insert) (which
-    /// replays the path upward to adopt splits) and [`remove`](Self::remove) (which
-    /// replays it to rebalance whatever the removal left deficient);
-    /// levels at and below the leaf are left untouched.
+    /// Descend from the root to the leaf, determining the path by appling `f`
+    /// to each inner node. Recording the path — each visited inner node and
+    /// the child index routed through — in `path[h]` for every inner level
+    /// `h`, and returning the leaf.
     #[inline]
     #[track_caller]
-    fn descend_recording(
+    fn descend_recording_with(
         &mut self,
-        key: &K,
+        f: impl Fn(&Inner<K, V, M>) -> usize,
         path: &mut TreePath<K, V, M>,
     ) -> NonNull<Node<K, V, M>> {
         let mut height = self.height as usize;
@@ -277,10 +276,12 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
         while height > 0 {
             // SAFETY: height is non-0, the pointer is valid. Root is always ok.
             let n = unsafe { node.as_mut().as_inner_mut() };
-            let child_idx = n.child_idx_for_key(key);
-            path[height].write((node, child_idx));
 
-            node = NonNull::from_mut(&mut n.children_mut()[child_idx]);
+            let idx = f(n);
+
+            path[height].write((node, idx));
+
+            node = NonNull::from_mut(&mut n.children_mut()[idx]);
 
             height -= 1;
         }
@@ -288,7 +289,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
         node
     }
 
-    /// As [`Self::descend_recording`], but building the descent in
+    /// As [`Self::descend_recording_with`], but building the descent in
     /// caller-provided storage — the way in for the plain ops. Returning a
     /// [`Descent`] by value compiles to a 1 KiB copy per call (Rust guarantees
     /// no NRVO), which is pure loss for
@@ -300,12 +301,12 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     // traffic for the slot.
     #[inline(always)]
     #[track_caller]
-    pub(crate) fn descend_into<'s>(
+    pub(crate) fn descend_into_with<'s>(
         &mut self,
-        key: &K,
+        f: impl Fn(&Inner<K, V, M>) -> usize,
         slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
     ) -> &'s mut Descent<K, V, M, A> {
-        let mut tree = NonNull::from_mut(self);
+        let mut tree: NonNull<BPlusTree<K, V, M, A>> = NonNull::from_mut(self);
 
         // Initialize field by field, in place: writing a whole `Descent`
         // value into the slot would be exactly the copy this out-param
@@ -332,14 +333,58 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
         // whose tag family dies at the next `&mut self` method call (see
         // the field docs on `Descent::tree`).
         // SAFETY: `tree` is `self`: live and exclusively borrowed.
-        let mut node = unsafe { tree.as_mut() }.descend_recording(key, &mut descent.path);
+        let mut node = unsafe { tree.as_mut() }.descend_recording_with(f, &mut descent.path);
 
         // SAFETY: `descend_recording` ran the descent to the bottom, so
         // the node in hand is the leaf (height invariant).
         let leaf = unsafe { node.as_mut().as_leaf_mut() };
-        (descent.partition, descent.exact) = leaf.probe(key);
+
         descent.leaf = NonNull::from_mut(leaf);
 
+        descent
+    }
+
+    /// Descend into the tree by key, writing the path to caller provided
+    /// storage.
+    #[inline(always)]
+    #[track_caller]
+    pub(crate) fn descend_into<'s>(
+        &mut self,
+        key: &K,
+        slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
+    ) -> &'s mut Descent<K, V, M, A> {
+        let descent = self.descend_into_with(|inner| inner.child_idx_for_key(key), slot);
+
+        (descent.partition, descent.exact) = unsafe { descent.leaf.as_ref() }.probe(key);
+
+        descent
+    }
+
+    /// Descend into the tree, always taking the first child, writing the path
+    /// to caller provided storage.
+    #[inline(always)]
+    #[track_caller]
+    pub(crate) fn descend_into_first<'s>(
+        &mut self,
+        slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
+    ) -> &'s mut Descent<K, V, M, A> {
+        let descent = self.descend_into_with(|_| 0, slot);
+        descent.partition = 0;
+        descent.exact = true;
+        descent
+    }
+
+    /// Descend into the tree, always taking the last child, writing the path
+    /// to caller provided storage.
+    #[inline(always)]
+    #[track_caller]
+    pub(crate) fn descend_into_last<'s>(
+        &mut self,
+        slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
+    ) -> &'s mut Descent<K, V, M, A> {
+        let descent = self.descend_into_with(|inner| inner.len() - 1, slot);
+        descent.partition = unsafe { descent.leaf.as_ref().len() - 1 };
+        descent.exact = true;
         descent
     }
 }

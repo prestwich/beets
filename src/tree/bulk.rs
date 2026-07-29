@@ -18,14 +18,16 @@
 //! which is always their left sibling. This ensures the resulting tree is
 //! tightly left-packed at every level, and no deficient right nodes exist.
 
-use core::cell::RefCell;
 use core::{
+    cell::RefCell,
     ops::{Index, IndexMut},
     ptr::NonNull,
 };
 
-use crate::allocator::{NodeAllocator, SlotAllocator};
-use crate::{BPlusTree, Inner, Key, Leaf, MAX_LEVELS, Node};
+use crate::{
+    BPlusTree, Inner, Key, Leaf, MAX_LEVELS, Node,
+    allocator::{NodeAllocator, SlotAllocator},
+};
 
 /// A [`Leaf`] node that has been constructed but not yet enrolled in any tree.
 ///

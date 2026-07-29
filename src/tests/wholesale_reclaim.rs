@@ -5,8 +5,7 @@
 //! individual slots. When either condition fails, the walk (and every
 //! value drop it owes) must still happen.
 
-use crate::common;
-use crate::common::counting;
+use crate::{common, common::counting};
 
 use std::{
     alloc::System,

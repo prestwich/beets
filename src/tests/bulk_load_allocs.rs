@@ -12,9 +12,11 @@
 //! has switched it on, so the exact counts hold even with parallel test
 //! threads allocating in the same process.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
+    sync::atomic::{AtomicUsize, Ordering::Relaxed},
+};
 
 use crate::common;
 

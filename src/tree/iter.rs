@@ -1,7 +1,6 @@
 use core::{ops::Bound, ptr::NonNull};
 
-use crate::allocator::NodeAllocator;
-use crate::{BPlusTree, Key, Leaf};
+use crate::{BPlusTree, Key, Leaf, allocator::NodeAllocator};
 
 fn check_bound<K: PartialOrd>(bound: &Bound<K>, key: &K) -> bool {
     match bound {

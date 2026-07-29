@@ -14,8 +14,10 @@
 use alloc::vec::Vec;
 
 use super::*;
-use crate::Global;
-use crate::test_util::{M, entries, own, v};
+use crate::{
+    Global,
+    test_util::{M, entries, own, v},
+};
 
 /// Below capacity, `insert_at` shift-inserts at the given partition,
 /// and the returned slot pointer addresses the new value — at every

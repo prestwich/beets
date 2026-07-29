@@ -4,8 +4,10 @@
 //! from.
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicIsize, Ordering::Relaxed},
+};
 
 use crate::{Inner, Key, Leaf, Node};
 

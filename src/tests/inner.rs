@@ -21,8 +21,10 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;
-use crate::test_util::{Counted, IMIN, LMIN, M, counted_leaf, inner_with_occupancies, leak};
-use crate::{Global, Leaf};
+use crate::{
+    Global, Leaf,
+    test_util::{Counted, IMIN, LMIN, M, counted_leaf, inner_with_occupancies, leak},
+};
 
 impl<K: Key, V, const M: usize> Inner<K, V, M> {
     /// Test-only constructor: assemble an inner from `children` and the

@@ -13,8 +13,10 @@
 use alloc::vec::Vec;
 use core::ops::Bound;
 
-use crate::BPlusTree;
-use crate::test_util::{M, v};
+use crate::{
+    BPlusTree,
+    test_util::{M, v},
+};
 
 /// A tree of `n` pairs grown by scattered inserts, so leaf
 /// occupancies vary (a sorted load would pack every leaf full).

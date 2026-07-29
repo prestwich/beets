@@ -1,8 +1,7 @@
 //! The [`SlotAllocator`] trait and the global heap ([`Global`]) as its
 //! default implementation; the contract lives on the parent module.
 
-use core::alloc::Layout;
-use core::ptr::NonNull;
+use core::{alloc::Layout, ptr::NonNull};
 
 use crate::{Inner, Key, Leaf};
 
@@ -116,7 +115,7 @@ impl<K: Key, V, const M: usize, A> NodeAllocator<K, V, M> for A where
 
 impl<T, G> SlotAllocator<T> for G
 where
-    G: alloc::alloc::GlobalAlloc,
+    G: core::alloc::GlobalAlloc,
 {
     fn allocate(&mut self, value: T) -> NonNull<T> {
         if const { core::mem::size_of::<T>() == 0 } {

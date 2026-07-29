@@ -12,8 +12,10 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;
-use crate::Global;
-use crate::test_util::{Counted, M, counted_leaf};
+use crate::{
+    Global,
+    test_util::{Counted, M, counted_leaf},
+};
 
 impl<K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>> Unyielded<'_, K, V, M, A> {
     /// Test-only raw view of the held leaf, for chain-link assertions

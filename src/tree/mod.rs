@@ -1,7 +1,9 @@
 use core::mem::MaybeUninit;
 
-use crate::allocator::{Global, NodeAllocator, SlotAllocator};
-use crate::{Key, Slabs};
+use crate::{
+    Key, Slabs,
+    allocator::{Global, NodeAllocator, SlotAllocator},
+};
 
 mod bulk;
 
@@ -278,6 +280,34 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
         // SAFETY: the descent is fresh from `descend` under this borrow,
         // the tree untouched since, and `exact` is true.
         Some(unsafe { descent.commit_remove() }.1)
+    }
+
+    /// Pop the first element of the tree, returning the KV pair.
+    pub fn pop_first(&mut self) -> Option<(K, V)> {
+        if self.is_empty() {
+            return None;
+        };
+        let mut slot = MaybeUninit::uninit();
+        let descent = self.descend_into_first(&mut slot);
+
+        // SAFETY: the descent is fresh from `descend` under this borrow,
+        // the tree untouched since, and `exact` is always true when
+        // descending into first.
+        Some(unsafe { descent.commit_remove() })
+    }
+
+    /// Pop the last element of the tree, returning the KV pair.
+    pub fn pop_last(&mut self) -> Option<(K, V)> {
+        if self.is_empty() {
+            return None;
+        };
+        let mut slot = MaybeUninit::uninit();
+        let descent = self.descend_into_last(&mut slot);
+
+        // SAFETY: the descent is fresh from `descend` under this borrow,
+        // the tree untouched since, and `exact` is always true when
+        // descending into last.
+        Some(unsafe { descent.commit_remove() })
     }
 
     /// Drop every pair, resetting to the empty tree.

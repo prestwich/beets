@@ -1,10 +1,11 @@
-use core::mem::MaybeUninit;
-use core::ptr::NonNull;
+use core::{mem::MaybeUninit, ptr::NonNull};
 
 #[cfg(debug_assertions)]
 use crate::NodeKind;
-use crate::allocator::{NodeAllocator, SlotAllocator};
-use crate::{Key, Node};
+use crate::{
+    Key, Node,
+    allocator::{NodeAllocator, SlotAllocator},
+};
 
 // TODO:
 // - perf: remove is the board's worst cell vs BTreeMap (see perf.md).

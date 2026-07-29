@@ -20,8 +20,7 @@
 //! not public API and is exempt from semver.
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::ops::Bound;
-use core::ptr::NonNull;
+use core::{ops::Bound, ptr::NonNull};
 
 use super::Node;
 use crate::{BPlusTree, Inner, Key, Leaf, NodeAllocator};

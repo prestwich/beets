@@ -6,14 +6,14 @@
 //! (in-bounds slot writes, slabs freed exactly once, no reads of
 //! still-live values during drop) are only fully checked by miri.
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;
-use crate::BPlusTree;
-use crate::test_util::{Counted, M, shuffled, v};
+use crate::{
+    BPlusTree,
+    test_util::{Counted, M, shuffled, v},
+};
 
 impl<T> SlabAlloc<T> {
     /// An empty allocator that will grow in slabs of `slab_capacity`
@@ -22,11 +22,7 @@ impl<T> SlabAlloc<T> {
     /// Capacity guidance: size slabs to a byte budget (a few pages,
     /// e.g. 64 KiB) rather than a slot count — [`Slabs`] does
     /// this for both node types.
-    ///
-    /// # Panics
-    ///
-    /// If `slab_capacity` is 0.
-    pub(crate) const fn new(slab_capacity: usize) -> Self {
+    pub(crate) const fn new(slab_capacity: NonZeroUsize) -> Self {
         Self::new_in(slab_capacity, Global)
     }
 }
@@ -61,22 +57,14 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
 /// nothing.
 #[test]
 fn an_unused_allocator_drops_cleanly() {
-    drop(SlabAlloc::<u64>::new(4));
-}
-
-/// Construction contract, per `new`'s docs: a zero-slot slab is
-/// refused with a panic.
-#[test]
-#[should_panic]
-fn a_zero_capacity_allocator_is_refused_at_construction() {
-    let _ = SlabAlloc::<u64>::new(0);
+    drop(SlabAlloc::<u64>::new(NonZeroUsize::new(4).unwrap()));
 }
 
 /// `allocate` moves the value in; `deallocate` moves exactly that
 /// value back out.
 #[test]
 fn allocate_then_deallocate_round_trips_the_value() {
-    let mut alloc = SlabAlloc::<u64>::new(4);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(4).unwrap());
     let p = alloc.allocate(0xBEE7);
     assert!(alloc.contains(p), "a just-allocated pointer must test as contained");
     // SAFETY: `p` came from this allocator and is retired only here.
@@ -93,7 +81,7 @@ fn addresses_stay_stable_and_distinct_across_slab_growth() {
     const CAP: usize = 4;
     const N: u64 = 3 * CAP as u64 + 1;
 
-    let mut alloc = SlabAlloc::<u64>::new(CAP);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(CAP).unwrap());
     let ptrs: Vec<_> = (0..N).map(|k| alloc.allocate(v(k))).collect();
 
     for (i, a) in ptrs.iter().enumerate() {
@@ -123,7 +111,7 @@ fn small_values_round_trip_across_slab_growth() {
     const CAP: usize = 5;
     const N: u32 = 3 * CAP as u32 + 1;
 
-    let mut alloc = SlabAlloc::<u32>::new(CAP);
+    let mut alloc = SlabAlloc::<u32>::new(NonZeroUsize::new(CAP).unwrap());
     let ptrs: Vec<_> = (0..N).map(|k| alloc.allocate(k)).collect();
 
     for (i, a) in ptrs.iter().enumerate() {
@@ -148,7 +136,7 @@ fn small_values_round_trip_across_slab_growth() {
 /// never-used slots remain.
 #[test]
 fn a_freed_slot_is_reused_before_any_virgin_slot() {
-    let mut alloc = SlabAlloc::<u64>::new(8);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(8).unwrap());
     let a = alloc.allocate(1);
     let b = alloc.allocate(2);
 
@@ -168,7 +156,7 @@ fn a_freed_slot_is_reused_before_any_virgin_slot() {
 /// two frees replay in reverse order.
 #[test]
 fn freed_slots_are_reused_most_recent_first() {
-    let mut alloc = SlabAlloc::<u64>::new(8);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(8).unwrap());
     let a = alloc.allocate(1);
     let b = alloc.allocate(2);
 
@@ -197,7 +185,7 @@ fn freed_slots_are_reused_most_recent_first() {
 /// storage.
 #[test]
 fn a_drained_free_list_falls_through_to_virgin_slots() {
-    let mut alloc = SlabAlloc::<u64>::new(8);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(8).unwrap());
     let a = alloc.allocate(0xDEAD_BEEF);
     // SAFETY: `a` is live and retired exactly once (reborn as `b`).
     unsafe { alloc.deallocate(a) };
@@ -225,7 +213,7 @@ fn a_drained_free_list_falls_through_to_virgin_slots() {
 fn mixed_traffic_teardown_drops_every_value_exactly_once() {
     const N: usize = 20;
     let live = Arc::new(AtomicIsize::new(0));
-    let mut alloc = SlabAlloc::<Counted>::new(4);
+    let mut alloc = SlabAlloc::<Counted>::new(NonZeroUsize::new(4).unwrap());
 
     let mut ptrs = Vec::new();
     for k in 0..N {
@@ -272,7 +260,7 @@ fn dropping_the_allocator_never_drops_still_live_values() {
         }
     }
 
-    let mut alloc = SlabAlloc::<Probe>::new(4);
+    let mut alloc = SlabAlloc::<Probe>::new(NonZeroUsize::new(4).unwrap());
     let _p = alloc.allocate(Probe(7));
 
     drop(alloc);
@@ -290,8 +278,8 @@ fn dropping_the_allocator_never_drops_still_live_values() {
 #[test]
 fn contains_accepts_live_pointers_and_rejects_foreign_ones() {
     const CAP: usize = 4;
-    let mut alloc = SlabAlloc::<u64>::new(CAP);
-    let mut other = SlabAlloc::<u64>::new(CAP);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(CAP).unwrap());
+    let mut other = SlabAlloc::<u64>::new(NonZeroUsize::new(CAP).unwrap());
 
     let ptrs: Vec<_> = (0..3 * CAP as u64).map(|k| alloc.allocate(k)).collect();
     let foreign_slab = other.allocate(99);
@@ -394,7 +382,7 @@ fn an_arena_backed_tree_owns_every_value_exactly_once() {
 #[test]
 fn clear_all_resets_a_grown_pool_for_reuse() {
     const CAP: usize = 4;
-    let mut alloc = SlabAlloc::<u64>::new(CAP);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(CAP).unwrap());
     for k in 0..(3 * CAP as u64 + 1) {
         alloc.allocate(v(k));
     }
@@ -418,7 +406,7 @@ fn clear_all_resets_a_grown_pool_for_reuse() {
 /// slot is handed out twice.)
 #[test]
 fn clear_all_supersedes_the_free_list() {
-    let mut alloc = SlabAlloc::<u64>::new(4);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(4).unwrap());
     let first: Vec<_> = (0..6u64).map(|k| alloc.allocate(k)).collect();
     // SAFETY: both slots are live and retired exactly once, here —
     // seeding the free list before the reset.
@@ -465,7 +453,7 @@ fn clear_all_never_drops_resident_values() {
         }
     }
 
-    let mut alloc = SlabAlloc::<Loud>::new(4);
+    let mut alloc = SlabAlloc::<Loud>::new(NonZeroUsize::new(4).unwrap());
     for k in 0..10 {
         alloc.allocate(Loud { _x: k });
     }
@@ -484,7 +472,7 @@ fn clear_all_never_drops_resident_values() {
 /// forget, and the pool allocates normally afterward.
 #[test]
 fn clear_all_on_a_virgin_pool_is_harmless() {
-    let mut alloc = SlabAlloc::<u64>::new(4);
+    let mut alloc = SlabAlloc::<u64>::new(NonZeroUsize::new(4).unwrap());
     // SAFETY: no outstanding slots exist to invalidate.
     unsafe { alloc.clear_all() };
 

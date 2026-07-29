@@ -21,8 +21,10 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;
-use crate::Global;
-use crate::test_util::{Counted, M, entries, own, shuffled, v};
+use crate::{
+    Global,
+    test_util::{Counted, M, entries, own, shuffled, v},
+};
 
 /// A second value for the same key, distinct from `v(k)`, for replacements.
 fn v2(k: u64) -> u64 {

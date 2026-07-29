@@ -42,14 +42,17 @@
 //! multi-leaf drain meets `MIN_OCCUPANCY`; a lone leaf (the
 //! root-to-be, which is exempt) is passed through unrepaired.
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use core::cell::RefCell;
-use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
+use alloc::{boxed::Box, sync::Arc};
+use core::{
+    cell::RefCell,
+    sync::atomic::{AtomicIsize, Ordering::Relaxed},
+};
 
 use super::*;
-use crate::Global;
-use crate::test_util::{Counted, LMIN, M, entries, own, shuffled, v};
+use crate::{
+    Global,
+    test_util::{Counted, LMIN, M, entries, own, shuffled, v},
+};
 
 impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     /// Insert `key`/`val`, deciding on its own whether a split is needed:

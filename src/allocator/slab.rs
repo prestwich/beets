@@ -46,22 +46,18 @@
 //!
 //! [`slabbin`]: https://docs.rs/slabbin/latest/slabbin/
 
-use alloc::alloc::{GlobalAlloc, Layout, handle_alloc_error};
-use core::{marker::PhantomData, mem::ManuallyDrop, ptr::NonNull};
+use alloc::alloc::handle_alloc_error;
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    marker::PhantomData,
+    num::NonZeroUsize,
+    ptr::NonNull,
+};
 
-use crate::allocator::SlotAllocator;
-use crate::{Global, Inner, Key, Leaf};
-
-/// One slot's storage. Which field is live is positional state (see the
-/// module invariants), mirroring the crate's untagged-[`Node`] discipline:
-/// LIVE slots hold `value`, FREE slots hold `next_free`, VIRGIN slots
-/// hold nothing.
-///
-/// [`Node`]: crate::Node
-union Slot<T> {
-    _value: ManuallyDrop<T>,
-    next_free: Option<NonNull<Slot<T>>>,
-}
+use crate::{
+    Global, Inner, Key, Leaf,
+    allocator::{Slot, SlotAllocator},
+};
 
 /// A slab's header. The `slab_capacity` slots trail it in the SAME
 /// allocation (layout computed by [`SlabAlloc::slab_layout`]); only the
@@ -90,7 +86,7 @@ pub(crate) struct SlabAlloc<T, A: GlobalAlloc = Global> {
     bump_range: core::ops::Range<NonNull<Slot<T>>>,
 
     /// Slots per slab, fixed at construction.
-    slab_capacity: usize,
+    slab_capacity: NonZeroUsize,
 
     /// Allocator, used to allocate new slabs..
     // DO NOT REORDER THIS FIELD.
@@ -105,7 +101,7 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     /// Capacity guidance: size slabs to a byte budget (a few pages,
     /// e.g. 64 KiB) rather than a slot count — [`Slabs`] below does
     /// this for both node types.
-    pub const fn new_in(slab_capacity: usize, alloc: A) -> Self {
+    pub const fn new_in(slab_capacity: NonZeroUsize, alloc: A) -> Self {
         Self {
             slabs: None,
             free_list: None,
@@ -200,7 +196,7 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     const fn slab_layout(&self) -> (core::alloc::Layout, usize) {
         let layout = Layout::new::<SlabHeader<T>>();
 
-        let extend = match Layout::array::<Slot<T>>(self.slab_capacity) {
+        let extend = match Layout::array::<Slot<T>>(self.slab_capacity.get()) {
             Ok(layout) => layout,
             Err(_) => panic!(),
         };
@@ -213,7 +209,7 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
 
     /// The size of a slab's slot array in bytes.
     const fn slot_array_size(&self) -> usize {
-        self.slab_capacity * core::mem::size_of::<Slot<T>>()
+        self.slab_capacity.get() * core::mem::size_of::<Slot<T>>()
     }
 
     /// Allocate and chain a fresh slab, resetting the bump window to its
@@ -397,15 +393,22 @@ impl<K: Key, V, const M: usize, A: GlobalAlloc> Slabs<K, V, M, A> {
     where
         A: Clone,
     {
+        // SAFETY:
+        // The `.max` calls ensure that the new_unchecked input is non-zero.
+        let (leaf_cap, inner_cap) = unsafe {
+            (
+                NonZeroUsize::new_unchecked(
+                    Self::SLAB_BUDGET / core::mem::size_of::<Leaf<K, V, M>>().max(1),
+                ),
+                NonZeroUsize::new_unchecked(
+                    Self::SLAB_BUDGET / core::mem::size_of::<Inner<K, V, M>>().max(1),
+                ),
+            )
+        };
+
         Self {
-            leaves: SlabAlloc::new_in(
-                Self::SLAB_BUDGET / core::mem::size_of::<Leaf<K, V, M>>(),
-                alloc.clone(),
-            ),
-            inners: SlabAlloc::new_in(
-                Self::SLAB_BUDGET / core::mem::size_of::<Inner<K, V, M>>(),
-                alloc,
-            ),
+            leaves: SlabAlloc::new_in(leaf_cap, alloc.clone()),
+            inners: SlabAlloc::new_in(inner_cap, alloc),
         }
     }
 }

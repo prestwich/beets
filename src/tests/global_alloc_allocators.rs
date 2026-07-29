@@ -4,8 +4,7 @@
 //! traffic actually flows through the supplied allocator's own
 //! `alloc`/`dealloc`.
 
-use crate::common;
-use crate::common::counting;
+use crate::{common, common::counting};
 
 use std::{
     alloc::System,

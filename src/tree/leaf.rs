@@ -640,7 +640,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     ///
     /// # Panics
     ///
-    /// If `idx` is not an occupied slot.
+    /// - If `idx` is not an occupied slot.
     pub(crate) fn remove_at(&mut self, idx: usize) -> (K, V) {
         debug_assert!(idx < self.occupied, "remove_at must target an occupied slot");
 

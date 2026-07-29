@@ -910,6 +910,271 @@ fn first_and_last_key_value_return_the_extreme_pairs() {
     );
 }
 
+// ── pop_first / pop_last ────────────────────────────────────────
+//
+// The `BTreeMap` contract: `pop_first` removes and returns the
+// minimum pair, `pop_last` the maximum, and both return `None` on
+// the empty tree. A pop is a removal at an end — the same rebalance
+// obligations as `remove` — pinned here through full drains and a
+// model-mirroring churn.
+
+/// `pop_first` on an empty tree returns `None` — whether the tree is
+/// freshly built or was emptied by removal — leaving it valid and
+/// usable.
+#[test]
+fn pop_first_on_an_empty_tree_returns_none() {
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::new();
+    assert_eq!(tree.pop_first(), None, "a fresh tree has no first pair to pop");
+    assert_eq!(tree.len(), 0, "a pop miss must not change len");
+    check_tree(&tree);
+
+    tree.insert(1, v(1));
+    assert_eq!(tree.remove(&1), Some(v(1)));
+    assert_eq!(tree.pop_first(), None, "an emptied tree has no first pair to pop");
+    check_tree(&tree);
+
+    tree.insert(2, v(2));
+    assert_eq!(tree.get(&2), Some(&v(2)), "the tree must remain usable after pop misses");
+    assert_eq!(tree.len(), 1);
+}
+
+/// `pop_last` on an empty tree returns `None` — whether the tree is
+/// freshly built or was emptied by removal — leaving it valid and
+/// usable.
+#[test]
+fn pop_last_on_an_empty_tree_returns_none() {
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::new();
+    assert_eq!(tree.pop_last(), None, "a fresh tree has no last pair to pop");
+    assert_eq!(tree.len(), 0, "a pop miss must not change len");
+    check_tree(&tree);
+
+    tree.insert(1, v(1));
+    assert_eq!(tree.remove(&1), Some(v(1)));
+    assert_eq!(tree.pop_last(), None, "an emptied tree has no last pair to pop");
+    check_tree(&tree);
+
+    tree.insert(2, v(2));
+    assert_eq!(tree.get(&2), Some(&v(2)), "the tree must remain usable after pop misses");
+    assert_eq!(tree.len(), 1);
+}
+
+/// A lone pair is both extremes: either pop returns it and leaves an
+/// empty, valid tree at height 0.
+#[test]
+fn popping_the_lone_pair_empties_the_tree() {
+    for pop_last in [false, true] {
+        let mut tree: BPlusTree<u64, u64, M> = BPlusTree::new();
+        tree.insert(7, v(7));
+
+        let got = if pop_last { tree.pop_last() } else { tree.pop_first() };
+        assert_eq!(got, Some((7, v(7))), "the lone pair is both extremes (pop_last={pop_last})");
+        assert!(tree.is_empty(), "popping the lone pair must empty the tree (pop_last={pop_last})");
+        check_tree(&tree);
+    }
+}
+
+/// `pop_first` removes and returns the minimum pair — the pair
+/// `first_key_value` reports — decrementing `len` and promoting the
+/// next key to minimum.
+#[test]
+fn pop_first_returns_the_minimum_pair() {
+    let n = (M * M + 1) as u64;
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
+
+    assert_eq!(tree.pop_first(), Some((0, v(0))), "pop_first must return the minimum pair");
+    assert_eq!(tree.len(), (n - 1) as usize, "a pop hit must decrement len");
+    assert_eq!(tree.get(&0), None, "the popped pair must be gone from the tree");
+    assert_eq!(
+        tree.first_key_value(),
+        Some((&1, &v(1))),
+        "the next key up must become the minimum"
+    );
+    check_tree(&tree);
+}
+
+/// `pop_last` removes and returns the maximum pair — the pair
+/// `last_key_value` reports — decrementing `len` and demoting the
+/// next key down to maximum.
+#[test]
+fn pop_last_returns_the_maximum_pair() {
+    let n = (M * M + 1) as u64;
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
+
+    assert_eq!(tree.pop_last(), Some((n - 1, v(n - 1))), "pop_last must return the maximum pair");
+    assert_eq!(tree.len(), (n - 1) as usize, "a pop hit must decrement len");
+    assert_eq!(tree.get(&(n - 1)), None, "the popped pair must be gone from the tree");
+    assert_eq!(
+        tree.last_key_value(),
+        Some((&(n - 2), &v(n - 2))),
+        "the next key down must become the maximum"
+    );
+    check_tree(&tree);
+}
+
+/// Draining a multi-level tree through `pop_first` alone yields every
+/// pair in ascending key order — through leaf borrows, merges, and
+/// root shrinks — back to an empty root leaf.
+#[test]
+fn pop_first_drains_in_ascending_order() {
+    let n = (M * M + 1) as u64;
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
+
+    for expect in 0..n {
+        assert_eq!(
+            tree.pop_first(),
+            Some((expect, v(expect))),
+            "pop_first must yield pair {expect} of the ascending order"
+        );
+        assert_eq!(tree.len(), (n - 1 - expect) as usize, "len must tick down on every pop");
+        if expect % 128 == 0 {
+            check_tree(&tree);
+        }
+    }
+    assert!(tree.is_empty(), "a full drain must empty the tree");
+    assert_eq!(tree.height, 0, "a drained tree must shrink back to a root leaf");
+    check_tree(&tree);
+}
+
+/// Draining through `pop_last` alone yields every pair in descending
+/// key order — through leaf borrows, merges, and root shrinks — back
+/// to an empty root leaf.
+#[test]
+fn pop_last_drains_in_descending_order() {
+    let n = (M * M + 1) as u64;
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
+
+    for expect in (0..n).rev() {
+        assert_eq!(
+            tree.pop_last(),
+            Some((expect, v(expect))),
+            "pop_last must yield pair {expect} of the descending order"
+        );
+        assert_eq!(tree.len(), expect as usize, "len must tick down on every pop");
+        if expect % 128 == 0 {
+            check_tree(&tree);
+        }
+    }
+    assert!(tree.is_empty(), "a full drain must empty the tree");
+    assert_eq!(tree.height, 0, "a drained tree must shrink back to a root leaf");
+    check_tree(&tree);
+}
+
+/// Alternating pops from both ends drain inward in agreement with
+/// `BTreeMap`, every pop a hit until the tree is empty.
+#[test]
+fn alternating_pops_mirror_btreemap() {
+    use alloc::collections::BTreeMap;
+
+    let n = (M * M + 1) as u64;
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
+    let mut model: BTreeMap<u64, u64> = (0..n).map(|k| (k, v(k))).collect();
+
+    for step in 0..n {
+        let (got, want) = if step % 2 == 0 {
+            (tree.pop_first(), model.pop_first())
+        } else {
+            (tree.pop_last(), model.pop_last())
+        };
+        assert!(want.is_some(), "fixture arithmetic: {n} pops of {n} pairs all hit");
+        assert_eq!(got, want, "pop must agree with the model at step {step}");
+        assert_eq!(tree.len(), model.len(), "len must agree with the model at step {step}");
+        if step % 128 == 0 {
+            check_tree(&tree);
+        }
+    }
+    assert!(tree.is_empty(), "the model drained, so the tree must have too");
+    check_tree(&tree);
+}
+
+/// Pops interleaved with inserts and removes: the whole mutation mix
+/// must keep agreeing with the model — return values, lengths, and
+/// final contents — with the invariants checked throughout.
+#[test]
+fn pop_churn_mirrors_btreemap() {
+    use alloc::collections::BTreeMap;
+
+    // Seeded non-empty so the churn spends its steps on populated
+    // trees; the empty-tree pop contract has its own pins above.
+    let mut tree: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..64).map(|k| (k, v(k))));
+    let mut model: BTreeMap<u64, u64> = (0..64).map(|k| (k, v(k))).collect();
+    let mut state: u64 = 0xB0B5_1ED5_0DD5_EED5;
+
+    for step in 0..1_500u64 {
+        let r = xorshift(&mut state);
+        let key = r % 200;
+        match (r >> 32) % 8 {
+            0..=4 => assert_eq!(
+                tree.insert(key, step),
+                model.insert(key, step),
+                "insert({key}) must agree with the model at step {step}"
+            ),
+            5 => assert_eq!(
+                tree.remove(&key),
+                model.remove(&key),
+                "remove({key}) must agree with the model at step {step}"
+            ),
+            6 => assert_eq!(
+                tree.pop_first(),
+                model.pop_first(),
+                "pop_first must agree with the model at step {step}"
+            ),
+            _ => assert_eq!(
+                tree.pop_last(),
+                model.pop_last(),
+                "pop_last must agree with the model at step {step}"
+            ),
+        }
+        assert_eq!(tree.len(), model.len(), "len must agree with the model at step {step}");
+        if step % 128 == 0 {
+            check_tree(&tree);
+        }
+    }
+
+    check_tree(&tree);
+    for (k, val) in &model {
+        assert_eq!(tree.get(k), Some(val), "key {k} must match the model at the end");
+    }
+}
+
+/// A pop transfers ownership of the pair to the caller: the value
+/// drops when the caller drops it, not inside the tree, and teardown
+/// drops only the survivors.
+#[test]
+fn pop_moves_the_pair_out_without_dropping_it() {
+    let live = Arc::new(AtomicIsize::new(0));
+    let n = 3 * M as u64;
+    {
+        let mut tree: BPlusTree<u64, Counted, M> = BPlusTree::new();
+        for k in 0..n {
+            tree.insert(k, Counted::new(k, &live));
+        }
+        assert_eq!(live.load(Relaxed), n as isize, "one live value per inserted key");
+
+        let (fk, fv) = tree.pop_first().expect("a populated tree must pop a first pair");
+        let (lk, lv) = tree.pop_last().expect("a populated tree must pop a last pair");
+        assert_eq!(fk, 0, "pop_first must hand back the minimum key");
+        assert_eq!(fv.0, 0, "pop_first must hand back the minimum key's value");
+        assert_eq!(lk, n - 1, "pop_last must hand back the maximum key");
+        assert_eq!(lv.0, n - 1, "pop_last must hand back the maximum key's value");
+        assert_eq!(live.load(Relaxed), n as isize, "a pop must move the values, not drop them");
+
+        drop(fv);
+        drop(lv);
+        assert_eq!(
+            live.load(Relaxed),
+            n as isize - 2,
+            "dropping the popped values must drop each exactly once"
+        );
+        check_tree(&tree);
+    }
+    assert_eq!(
+        live.load(Relaxed),
+        0,
+        "teardown must drop every survivor exactly once \
+         (positive = leak, negative = double-drop)"
+    );
+}
+
 // ── first_leaf / last_leaf ──────────────────────────────────────
 
 /// A height-0 tree is its own chain: `first_leaf` and `last_leaf`

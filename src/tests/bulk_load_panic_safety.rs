@@ -12,7 +12,10 @@ use crate::common;
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, atomic::AtomicIsize, atomic::Ordering::Relaxed},
+    sync::{
+        Arc,
+        atomic::{AtomicIsize, Ordering::Relaxed},
+    },
 };
 
 use crate::BPlusTree;

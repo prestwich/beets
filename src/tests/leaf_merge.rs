@@ -11,8 +11,7 @@
 //! drops nothing, and every value from both sides drops exactly once
 //! when the merged leaf drops.
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;
