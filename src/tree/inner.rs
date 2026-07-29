@@ -837,5 +837,5 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
 }
 
 #[cfg(test)]
-#[path = "tests/inner.rs"]
+#[path = "../tests/inner.rs"]
 mod tests;

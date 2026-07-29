@@ -1,6 +1,6 @@
 //! Unit tests for the index-addressed primitives the descend/commit
-//! split (and, above it, the entry API) addresses leaves through:
-//! `insert_at`, `remove_at`, and the by-slot value accessors.
+//! addresses leaves through: `insert_at`, `remove_at`, and the by-slot value
+//! accessors.
 //!
 //! Contract pinned for `insert_at`: the caller has already searched,
 //! so the pair lands at the given partition with no re-search — and

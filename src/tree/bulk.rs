@@ -509,5 +509,5 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
 }
 
 #[cfg(test)]
-#[path = "tests/bulk.rs"]
+#[path = "../tests/bulk.rs"]
 mod tests;

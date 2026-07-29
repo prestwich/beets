@@ -106,10 +106,6 @@ impl<K: Key, V, const M: usize> Node<K, V, M> {
     /// Test-only — the production descent is iterative; the
     /// node-layer tests drive `rebalance` through it.
     ///
-    /// (Hand-written rather than a `delegate!` entry: removal can merge
-    /// nodes, so it threads the allocator, and the macro has no slot for
-    /// a generic parameter.)
-    ///
     /// # Safety
     ///
     /// `height` must be the height of the subtree rooted at this node.

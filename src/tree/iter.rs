@@ -295,5 +295,5 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> IntoIterator
 }
 
 #[cfg(test)]
-#[path = "tests/iter.rs"]
+#[path = "../tests/iter.rs"]
 mod tests;

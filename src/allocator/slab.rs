@@ -460,5 +460,5 @@ impl<K: Key, V, const M: usize, A: GlobalAlloc> SlotAllocator<Inner<K, V, M>>
 }
 
 #[cfg(test)]
-#[path = "tests/slab.rs"]
+#[path = "../tests/slab.rs"]
 mod tests;

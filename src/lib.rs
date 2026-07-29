@@ -48,40 +48,27 @@
 extern crate alloc;
 
 mod allocator;
-pub use allocator::{Global, NodeAllocator, SlotAllocator};
-
-mod bulk;
-
-mod inner;
-// `pub` (not `pub(crate)`) so allocator bounds can name the node types:
-// `A: SlotAllocator<Leaf<..>> + SlotAllocator<Inner<..>>` appears in the
-// tree's public interface. The types are opaque — every field and method
-// stays `pub(crate)` — they exist publicly only to be named.
-#[doc(hidden)]
-pub use inner::Inner;
-
-mod iter;
+pub use allocator::{Global, NodeAllocator, Slabs, SlotAllocator};
 
 mod key;
 pub use key::Key;
 
-mod leaf;
-#[doc(hidden)]
-pub use leaf::Leaf;
-
 mod tree;
 pub use tree::BPlusTree;
+// `pub` (not `pub(crate)`) so allocator bounds can name the node types:
+// `A: SlotAllocator<Leaf<..>> + SlotAllocator<Inner<..>>` appears in the
+// tree's public interface. The types are opaque — every field and method
+// stays `pub(crate)` — they exist publicly only to be named.
 pub(crate) use tree::Node;
 #[cfg(debug_assertions)]
 pub(crate) use tree::NodeKind;
+#[doc(hidden)]
+pub use tree::{Inner, Leaf};
 // The testutils surface (differential harness + invariant net); lives
 // under `tree` for private-field access, surfaces here as
 // `crate::harness` for the in-crate tests and the fuzz targets.
 #[cfg(any(test, feature = "testutils"))]
 pub use tree::harness;
-
-mod slab;
-pub use slab::Slabs;
 
 /// The target size of a node's key allocation, in bytes.
 const NODE_BUDGET: usize = 512;

@@ -236,8 +236,6 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
 
     /// Value-only counterpart of [`Self::kv_ref_unchecked`]: the value in
     /// slot `idx`. Panics if out of range.
-    // The entry API's occupied views read through this; the allow
-    // leaves when their bodies land.
     #[allow(dead_code)]
     pub(crate) fn val_ref_unchecked(&self, idx: usize) -> &V {
         &self.vals_ref()[idx]
@@ -669,25 +667,25 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
 }
 
 #[cfg(test)]
-#[path = "tests/leaf.rs"]
+#[path = "../tests/leaf.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "tests/leaf_merge.rs"]
+#[path = "../tests/leaf_merge.rs"]
 mod merge_tests;
 
 #[cfg(test)]
-#[path = "tests/leaf_splitting_insert.rs"]
+#[path = "../tests/leaf_splitting_insert.rs"]
 mod splitting_insert_tests;
 
 #[cfg(test)]
-#[path = "tests/leaf_insert.rs"]
+#[path = "../tests/leaf_insert.rs"]
 mod insert_tests;
 
 #[cfg(test)]
-#[path = "tests/leaf_index_addressed.rs"]
+#[path = "../tests/leaf_index_addressed.rs"]
 mod index_addressed_tests;
 
 #[cfg(test)]
-#[path = "tests/leaf_steal.rs"]
+#[path = "../tests/leaf_steal.rs"]
 mod steal_tests;
