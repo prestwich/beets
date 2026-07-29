@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,6 +33,32 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo test --doc --all-features
+
+  # Miri is slow, so run it only on pushes to main, and only once the
+  # regular suite is green.
+  miri:
+    name: Miri
+    if: github.event_name == 'push'
+    needs: [test, doctest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: Run tests under Miri
+        env:
+          # Proptests are orders of magnitude slower under Miri; a few cases
+          # per property keeps the run under the job timeout.
+          PROPTEST_CASES: '8'
+        # nextest runs one process per test, so tests interpret in
+        # parallel across the runner's cores.
+        run: cargo miri nextest run --all-features
 
   rustfmt:
     name: Rustfmt
@@ -68,3 +96,17 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --document-private-items --all-features
+
+  # The "no-std" keyword as a checked claim: the library must build for
+  # a 32-bit bare-metal target with default features off.
+  embedded:
+    name: Embedded Target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - name: Check no-std 32-bit build
+        run: cargo check --lib --no-default-features --target thumbv7m-none-eabi
