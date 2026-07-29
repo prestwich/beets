@@ -69,9 +69,22 @@ pub mod harness;
 /// The target size of a node's key allocation, in bytes.
 const NODE_BUDGET: usize = 512;
 
-// The heuristic number of keys that fit in a node.
+/// The heuristic number of keys that fit in a node.
 const fn fanout(key_size: usize) -> usize {
     NODE_BUDGET / (key_size + size_of::<u64>())
+}
+
+/// The max height of a tree with fanout `m`.
+pub const fn max_height(m: usize) -> usize {
+    assert_fanout_floor(m);
+    ((usize::BITS - 2) / m.div_ceil(2).ilog(2)) as usize
+}
+
+/// The maximum number of levels in a tree path. Used to specify the `H`
+/// parameter.
+pub const fn max_levels(m: usize) -> usize {
+    assert_fanout_floor(m);
+    max_height(m) + 1
 }
 
 /// Hard floor on the fanout: `M >= 3` makes `MIN_OCCUPANCY >= 2`, so a
@@ -80,16 +93,19 @@ const fn fanout(key_size: usize) -> usize {
 /// constructors evaluate this in a `const` block — every node is born
 /// there, so a too-small `M` is a compile error at monomorphization.
 pub(crate) const fn assert_fanout_floor(m: usize) {
-    assert!(m >= 3, "fanout M must be at least 3");
+    assert!(m >= MIN_FANOUT, "fanout M must be at least 3");
 }
+
+/// Trees MUST have a fanout capacity of at least 3.
+pub(crate) const MIN_FANOUT: usize = 3;
 
 /// One slot per possible tree level, for the fixed per-level scratch
 /// arrays ([`insert`](BPlusTree::insert)/[`remove`](BPlusTree::remove)'s
-/// descent paths, the bulk loader's `TreeProgress`). 64 is unreachable:
-/// the minimum fanout of 3 caps the
+/// descent paths, the bulk loader's `TreeProgress`). `usize::BITS` is
+/// unreachable: the minimum fanout of 3 caps the
 /// height of even a [`usize::MAX`]-pair tree well below it (see
 /// [`BPlusTree::MAX_HEIGHT`]).
-pub(crate) const MAX_LEVELS: usize = 64;
+pub(crate) const DEFAULT_MAX_LEVELS: usize = usize::BITS as usize;
 
 #[cfg(test)]
 #[path = "tests/test_util.rs"]

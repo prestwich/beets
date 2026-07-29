@@ -217,3 +217,27 @@ fn deep_cascade_loads_own_every_value_exactly_once() {
          (positive = leak, negative = double-drop)"
     );
 }
+
+/// The loader's scratch is `H` `LevelState`s plus a fixed tail — the
+/// bulk-load stack cost that tuning `H` down exists to shrink.
+#[test]
+fn loader_scratch_scales_with_h() {
+    let level = size_of::<LevelState<u64, Counted, M>>();
+    assert_eq!(
+        size_of::<TreeProgress<'_, u64, Counted, M, Global, 4>>() + 28 * level,
+        size_of::<TreeProgress<'_, u64, Counted, M, Global, 32>>(),
+        "each level of H must cost exactly one LevelState"
+    );
+}
+
+/// A load that needs more inner levels than the cap provides must
+/// panic mid-load instead of writing past the treepath. At the minimum
+/// fanout (3), 54 pairs already build a height-3 tree — one inner
+/// level more than `H = 2` provides.
+#[test]
+#[should_panic]
+fn loading_past_the_cap_panics() {
+    let n: u64 = 54;
+    let _tree: BPlusTree<[u8; 121], u64, 3, crate::Slabs<[u8; 121], u64, 3>, 2> =
+        BPlusTree::from_sorted_iter((0..n).map(|k| (crate::harness::wide(k), k)));
+}

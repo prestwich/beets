@@ -4,14 +4,14 @@
 //! the full invariant net ([`BPlusTree::check`]) after every mutation.
 //!
 //! One harness, two drivers: the in-crate proptest properties
-//! (`src/tree.rs`) generate [`Op`] sequences with proptest strategies
+//! (`src/tree.rs`) generate [`Op`](crate::harness::Op) sequences with proptest strategies
 //! and shrink failures to minimal reproductions; the fuzz target
 //! (`fuzz/fuzz_targets/differential.rs`) derives them from
 //! coverage-guided bytes via `arbitrary`. A failure from either is a
 //! panic whose message states the violated contract.
 //!
 //! The invariant net lives here too (the bottom half of this file):
-//! [`BPlusTree::check`] and the recursive [`Node::check_invariants`]
+//! [`BPlusTree::check`] and the recursive `Node::check_invariants`
 //! walk it delegates to, plus the raw key/child views they read. The
 //! net reaches tree internals through the crate's test-only views
 //! (`BPlusTree::test_root` and friends), not private fields.
@@ -456,11 +456,13 @@ impl<K: Key, V, const M: usize> Node<K, V, M> {
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V, M, A> {
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    BPlusTree<K, V, M, A, H>
+{
     /// Test-only, for tests outside the tree module (which cannot reach
     /// the private fields) and, under `testutils`, external test
     /// drivers: the full-strength invariant net — the structural walk
-    /// ([`Node::check_invariants`]) plus the two facts only the tree
+    /// (`Node::check_invariants`) plus the two facts only the tree
     /// layer can vouch for: `len` equals the pairs actually on the
     /// chain, and the chain terminates at the last leaf.
     ///

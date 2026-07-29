@@ -108,7 +108,7 @@ macro_rules! cast_accessors {
 
 /// Dispatch a niladic method on [`Node`] to whichever pointee `height`
 /// implies: a single cast — no routing key, no recursion, no threading
-/// of `height` down a descent (that is [`delegate!`]'s business). Each
+/// of `height` down a descent (that is the test-only `delegate!`'s business). Each
 /// listed method must exist on both [`Leaf`] and [`Inner`] with the written
 /// signature. Doc comments and other attributes carry over.
 ///
@@ -320,7 +320,7 @@ impl<K: Key, V, const M: usize> Node<K, V, M> {
     ///
     /// NOT panic-safe. A value [`Drop`] that unwinds partway through abandons
     /// every node and value not yet reached in this subtree — they leak. This
-    /// is also the path taken by [`BPlusTree`]'s `Drop`, so a panic escaping it
+    /// is also the path taken by [`BPlusTree`](crate::BPlusTree)'s `Drop`, so a panic escaping it
     /// during an already-unwinding drop double-panics and aborts.
     pub(crate) unsafe fn drop_subtree<A: NodeAllocator<K, V, M>>(self, height: u8, alloc: &mut A) {
         if height == 0 {

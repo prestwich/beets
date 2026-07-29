@@ -25,7 +25,7 @@ use core::{
 };
 
 use crate::{
-    BPlusTree, Inner, Key, Leaf, MAX_LEVELS, Node,
+    BPlusTree, DEFAULT_MAX_LEVELS, Inner, Key, Leaf, Node,
     allocator::{NodeAllocator, SlotAllocator},
 };
 
@@ -122,8 +122,15 @@ impl<K: Key, V, const M: usize> LevelState<K, V, M> {
     }
 }
 
-struct TreeProgress<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> {
-    states: [LevelState<K, V, M>; MAX_LEVELS],
+struct TreeProgress<
+    'a,
+    K: Key,
+    V,
+    const M: usize,
+    A: NodeAllocator<K, V, M>,
+    const H: usize = DEFAULT_MAX_LEVELS,
+> {
+    states: [LevelState<K, V, M>; H],
     len: usize,
     /// The allocator every chunk comes from — a shared handle, so the
     /// unwind `Drop` below can free through it while the loader (and
@@ -132,29 +139,31 @@ struct TreeProgress<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> {
     alloc: &'a RefCell<A>,
 }
 
-impl<Idx, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Index<Idx>
-    for TreeProgress<'_, K, V, M, A>
+impl<Idx, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Index<Idx>
+    for TreeProgress<'_, K, V, M, A, H>
 where
-    [LevelState<K, V, M>; MAX_LEVELS]: Index<Idx>,
+    [LevelState<K, V, M>; H]: Index<Idx>,
 {
-    type Output = <[LevelState<K, V, M>; MAX_LEVELS] as Index<Idx>>::Output;
+    type Output = <[LevelState<K, V, M>; H] as Index<Idx>>::Output;
 
     fn index(&self, index: Idx) -> &Self::Output {
         &self.states[index]
     }
 }
 
-impl<Idx, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> IndexMut<Idx>
-    for TreeProgress<'_, K, V, M, A>
+impl<Idx, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> IndexMut<Idx>
+    for TreeProgress<'_, K, V, M, A, H>
 where
-    [LevelState<K, V, M>; MAX_LEVELS]: IndexMut<Idx>,
+    [LevelState<K, V, M>; H]: IndexMut<Idx>,
 {
     fn index_mut(&mut self, index: Idx) -> &mut Self::Output {
         &mut self.states[index]
     }
 }
 
-impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Drop for TreeProgress<'_, K, V, M, A> {
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Drop
+    for TreeProgress<'_, K, V, M, A, H>
+{
     /// Unwind teardown. The source iterator is caller code and runs
     /// between every pair, so a load can panic while the treepath holds
     /// chunks — each one the sole handle to a live subtree of leaves
@@ -190,9 +199,16 @@ impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Drop for TreeProgress
     }
 }
 
-impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> TreeProgress<'a, K, V, M, A> {
+impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    TreeProgress<'a, K, V, M, A, H>
+{
+    const __LEVEL_CAP: () =
+        assert!(H >= 1 && H <= usize::BITS as usize, "the level cap H must be in 1..=usize::BITS");
+
     fn new(alloc: &'a RefCell<A>) -> Self {
-        Self { states: [const { LevelState::new() }; MAX_LEVELS], len: 0, alloc }
+        const { Self::__LEVEL_CAP };
+
+        Self { states: [const { LevelState::new() }; H], len: 0, alloc }
     }
 
     /// Push one `(subtree-min key, node)` pair into the state at level
@@ -339,7 +355,9 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> TreeProgress<'a, 
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V, M, A> {
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    BPlusTree<K, V, M, A, H>
+{
     /// Bulk-load a tree from a stream of pairs sorted strictly ascending
     /// by key, in one pass: chunk the pairs into a linked leaf chain,
     /// then build each level of inners over the one below, bottom-up,
@@ -414,7 +432,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
 
         // Stream every leaf into the treepath's level 0;
         // carries climb on their own as chunks fill (see `TreeProgress::push`).
-        let mut tree = TreeProgress::new(&allocator);
+        let mut tree: TreeProgress<'_, K, V, M, A, H> = TreeProgress::new(&allocator);
 
         tree.push(0, first_key, first_leaf.into_node());
         tree.push(0, second_key, second_leaf.into_node());

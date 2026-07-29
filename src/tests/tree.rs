@@ -24,7 +24,9 @@ use crate::test_util::{Counted, IMIN, LMIN, M, counted_leaf, minimal_inner, v, x
 
 /// Test-only views into the tree's private fields, for the invariant
 /// net (`crate::harness`), which lives outside the `tree` module.
-impl<K: Key, V, const N: usize, A: NodeAllocator<K, V, N>> BPlusTree<K, V, N, A> {
+impl<K: Key, V, const N: usize, A: NodeAllocator<K, V, N>, const H: usize>
+    BPlusTree<K, V, N, A, H>
+{
     pub(crate) fn test_root(&self) -> &Node<K, V, N> {
         &self.root
     }
@@ -1327,5 +1329,81 @@ proptest! {
         ops in proptest::collection::vec(op_strategy(), 0..256)
     ) {
         run_differential::<[u8; 121], 3, Slabs<[u8; 121], u64, 3>>(wide, seed, &ops);
+    }
+}
+
+/// The level-cap (`H`) contract: `H` level slots must fit any tree the
+/// cap admits (a height-`h` tree occupies `h + 1` levels), the scratch
+/// they size must cost exactly one slot per level, and a tree grown
+/// past its cap must refuse the next descent rather than write out of
+/// bounds.
+#[cfg(test)]
+mod height_cap {
+    use super::*;
+
+    /// `Descent` is `H` path slots plus a fixed handful of words — the
+    /// per-op stack cost that tuning `H` down exists to shrink.
+    #[test]
+    fn descent_scratch_scales_with_h() {
+        type D4 = crate::tree::descent::Descent<u64, u64, M, Slabs<u64, u64, M>, 4>;
+        type D32 = crate::tree::descent::Descent<u64, u64, M, Slabs<u64, u64, M>, 32>;
+        let word = size_of::<usize>();
+        assert_eq!(
+            size_of::<D4>() + 28 * 2 * word,
+            size_of::<D32>(),
+            "each level of H must cost exactly one (node ptr, child idx) path slot"
+        );
+        assert!(
+            size_of::<D4>() <= 13 * word,
+            "the descent's fixed overhead beyond the path must stay a handful of words"
+        );
+    }
+
+    /// The tightest always-safe cap — `max_levels(M)` — must support
+    /// the full lifecycle exactly like the default cap does.
+    #[test]
+    fn max_levels_cap_supports_the_full_lifecycle() {
+        let n: u64 = if cfg!(miri) { 200 } else { 4096 };
+        let mut tree: BPlusTree<u64, u64, M, Slabs<u64, u64, M>, { crate::max_levels(M) }> =
+            BPlusTree::new();
+        for k in 0..n {
+            tree.insert(k, v(k));
+        }
+        tree.check();
+        for k in 0..n {
+            assert_eq!(tree.get(&k), Some(&v(k)), "every inserted pair must be readable");
+        }
+        for k in 0..n {
+            assert_eq!(tree.remove(&k), Some(v(k)), "every inserted pair must be removable");
+        }
+        assert!(tree.is_empty(), "the emptied tree must report empty");
+    }
+
+    /// `H = 1` admits a tree that never outgrows its root leaf: up to
+    /// `M` pairs living entirely at height 0, with every op available.
+    #[test]
+    fn min_cap_fits_a_root_leaf_tree() {
+        let mut tree: BPlusTree<u64, u64, M, Slabs<u64, u64, M>, 1> = BPlusTree::new();
+        for k in 0..(M as u64 - 1) {
+            tree.insert(k, v(k));
+        }
+        tree.check();
+        for k in 0..(M as u64 - 1) {
+            assert_eq!(tree.remove(&k), Some(v(k)), "a height-0 tree must support every op");
+        }
+        assert!(tree.is_empty(), "the emptied tree must report empty");
+    }
+
+    /// `H = 2` admits heights 0 and 1; the insert that must descend a
+    /// height-2 tree panics instead of writing past the path. At the
+    /// minimum fanout (3), 100 sorted inserts overshoot that height
+    /// many times over.
+    #[test]
+    #[should_panic]
+    fn outgrowing_the_cap_panics() {
+        let mut tree: BPlusTree<[u8; 121], u64, 3, Slabs<[u8; 121], u64, 3>, 2> = BPlusTree::new();
+        for k in 0..100 {
+            tree.insert(crate::harness::wide(k), k);
+        }
     }
 }

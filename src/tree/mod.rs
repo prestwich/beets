@@ -46,6 +46,57 @@ pub(crate) use node::NodeKind;
 /// let tree: beets::BPlusTree<u64, u64, 7> = beets::BPlusTree::new();
 /// ```
 ///
+/// The max levels `H` determines the amount of scratch space used for
+/// descending the tree (e.g. for each insert/remove) or when bulk-loading the
+/// tree. It defaults to [`usize::BITS`] levels, which admits any tree. If
+/// your application is memory sensitive, you can tune this parameter to use
+/// less stack memory for mutation operations. A tree of height `h` occupies
+/// `h + 1` levels, so `H` is also a cap on how far the tree can grow: an
+/// operation that must reach more levels than `H` provides panics rather
+/// than writing out of bounds. `H` must be in `1..=usize::BITS`, checked at
+/// compile time, where the tree is born:
+///
+/// ```compile_fail
+/// // H = 0 has no room for even the root's level — this must not compile.
+/// const M: usize = <u64 as beets::Key>::FANOUT;
+/// let tree: beets::BPlusTree<u64, u64, M, beets::Slabs<u64, u64, M>, 0> =
+///     beets::BPlusTree::new();
+/// ```
+///
+/// A reasonable setting is `{ beets::max_levels(M) }` — the worst-case level
+/// count for the fanout, safe for a tree of any size:
+///
+/// ```
+/// use beets::{BPlusTree, Key, Slabs, max_levels};
+///
+/// const M: usize = <u64 as Key>::FANOUT;
+/// let mut tree: BPlusTree<u64, &str, M, Slabs<u64, &str, M>, { max_levels(M) }> =
+///     BPlusTree::new();
+///
+/// tree.insert(7, "seven");
+/// assert_eq!(tree.get(&7), Some(&"seven"));
+/// ```
+///
+/// Applications with known, fixed-size trees may set even lower values —
+/// particularly useful for embedded applications. The application vouches
+/// that the tree stays under the cap; one grown past it panics:
+///
+/// ```
+/// use beets::{BPlusTree, Key, Slabs};
+///
+/// const M: usize = <u64 as Key>::FANOUT;
+/// // A table of at most a few hundred entries never grows past
+/// // height 2, so three level slots cover it — the mutation scratch
+/// // shrinks from `usize::BITS` path slots to 3.
+/// let mut tree: BPlusTree<u64, u64, M, Slabs<u64, u64, M>, 3> = BPlusTree::new();
+///
+/// for k in 0..300 {
+///     tree.insert(k, k * 2);
+/// }
+/// assert_eq!(tree.len(), 300);
+/// assert_eq!(tree.get(&250), Some(&500));
+/// ```
+///
 /// The tree is [`Send`] exactly when its parts are; a non-`Send`
 /// constituent must deny it:
 ///
@@ -63,8 +114,13 @@ pub(crate) use node::NodeKind;
 /// fn require_sync<T: Sync>() {}
 /// require_sync::<beets::BPlusTree<u64, core::cell::Cell<u8>, { <u64 as beets::Key>::FANOUT }>>();
 /// ```
-pub struct BPlusTree<K: Key, V, const M: usize, A: NodeAllocator<K, V, M> = Slabs<K, V, M, Global>>
-{
+pub struct BPlusTree<
+    K: Key,
+    V,
+    const M: usize,
+    A: NodeAllocator<K, V, M> = Slabs<K, V, M, Global>,
+    const H: usize = { crate::DEFAULT_MAX_LEVELS },
+> {
     // The handle IS the pointer; boxing it would be double indirection.
     root: Node<K, V, M>,
     height: u8,
@@ -85,7 +141,7 @@ pub struct BPlusTree<K: Key, V, const M: usize, A: NodeAllocator<K, V, M> = Slab
 // move. Nothing in the tree is tied to its birth thread; moving it
 // moves the nodes' `K`/`V` payloads and the allocator along with it,
 // which is exactly what the three `Send` bounds sign for.
-unsafe impl<K, V, const M: usize, A> Send for BPlusTree<K, V, M, A>
+unsafe impl<K, V, const M: usize, A, const H: usize> Send for BPlusTree<K, V, M, A, H>
 where
     K: Key + Send,
     V: Send,
@@ -107,7 +163,7 @@ where
 // Every future `&self` feature re-signs this contract; a
 // `&self`-written cache (the leaf-cache TODO atop this file) is the
 // standing example of what would break it.
-unsafe impl<K, V, const M: usize, A> Sync for BPlusTree<K, V, M, A>
+unsafe impl<K, V, const M: usize, A, const H: usize> Sync for BPlusTree<K, V, M, A, H>
 where
     K: Key + Sync,
     V: Sync,
@@ -148,7 +204,9 @@ macro_rules! descend {
     }};
 }
 
-impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Drop for BPlusTree<K, V, M, A> {
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Drop
+    for BPlusTree<K, V, M, A, H>
+{
     // Panic during teardown: NOT panic-safe. Teardown walks the tree dropping
     // values as it goes; a value `Drop` that unwinds leaks every node and
     // value not yet reached. Because this is itself `Drop` glue, such a panic
@@ -175,13 +233,18 @@ impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Drop for BPlusTree<K,
 // in it. `height` changes in exactly two places — `insert`'s root grow and
 // `remove`'s root shrink — and every unsafe `Node` call justifies its
 // height argument by this invariant.
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V, M, A> {
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    BPlusTree<K, V, M, A, H>
+{
     /// A heuristic max height.
-    pub const MAX_HEIGHT: usize = ((usize::BITS - 2) / M.div_ceil(2).ilog(2)) as usize;
+    pub const MAX_HEIGHT: usize = crate::max_height(M);
 
     pub const CAN_SKIP_DROP: bool = !core::mem::needs_drop::<V>()
         && <A as SlotAllocator<Leaf<K, V, M>>>::OWNS_ALL
         && <A as SlotAllocator<Inner<K, V, M>>>::OWNS_ALL;
+
+    const __LEVEL_CAP: () =
+        assert!(H >= 1 && H <= usize::BITS as usize, "the level cap H must be in 1..=usize::BITS");
 
     /// Creates a tree whose root is a single empty leaf.
     pub fn new() -> Self
@@ -194,6 +257,8 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     /// As [`Self::new`], but allocating nodes from `allocator` for the
     /// tree's whole life.
     pub fn new_in(mut allocator: A) -> Self {
+        const { Self::__LEVEL_CAP };
+
         let root = Node::from_leaf_ptr(allocator.allocate(Leaf::new(None)));
         Self { root, height: 0, len: 0, allocator }
     }
@@ -412,15 +477,16 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default> Default
-    for BPlusTree<K, V, M, A>
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default, const H: usize> Default
+    for BPlusTree<K, V, M, A, H>
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K, V, const M: usize, A: NodeAllocator<K, V, M>> core::fmt::Debug for BPlusTree<K, V, M, A>
+impl<K, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> core::fmt::Debug
+    for BPlusTree<K, V, M, A, H>
 where
     K: Key + core::fmt::Debug,
     V: core::fmt::Debug,
@@ -430,8 +496,8 @@ where
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default> FromIterator<(K, V)>
-    for BPlusTree<K, V, M, A>
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default, const H: usize>
+    FromIterator<(K, V)> for BPlusTree<K, V, M, A, H>
 {
     /// Builds through the bulk loader, not an insert loop: collect, sort,
     /// dedup, then [`BPlusTree::from_sorted_iter`]. The loaded tree is
@@ -460,8 +526,8 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default> FromI
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> Extend<(K, V)>
-    for BPlusTree<K, V, M, A>
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Extend<(K, V)>
+    for BPlusTree<K, V, M, A, H>
 {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (key, val) in iter {

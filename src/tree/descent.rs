@@ -1,7 +1,7 @@
 use core::{mem::MaybeUninit, ptr::NonNull};
 
 use crate::{
-    Inner, Key, Leaf, MAX_LEVELS,
+    DEFAULT_MAX_LEVELS, Inner, Key, Leaf,
     allocator::{Global, NodeAllocator},
 };
 
@@ -10,7 +10,8 @@ use super::{BPlusTree, Node};
 /// The recorded path of one root-to-leaf descent: for each inner level
 /// `h`, `path[h]` holds the visited node and the child index routed
 /// through. Slots outside the descended range stay uninitialized.
-type TreePath<K, V, const M: usize> = [MaybeUninit<(NonNull<Node<K, V, M>>, usize)>; MAX_LEVELS];
+type TreePath<K, V, const M: usize, const H: usize = DEFAULT_MAX_LEVELS> =
+    [MaybeUninit<(NonNull<Node<K, V, M>>, usize)>; H];
 
 /// One recorded descent for a key: the tree it walked, the
 /// [`path`](Descent::path) it recorded, the leaf it landed at, and the key's
@@ -25,18 +26,24 @@ type TreePath<K, V, const M: usize> = [MaybeUninit<(NonNull<Node<K, V, M>>, usiz
 /// call ends it (they take `&mut self` purely to avoid moving the
 /// recorded path; a committed descent MUST NOT be used again). Until then, the
 /// tree may be reached through the descent's pointers ONLY.
-pub(crate) struct Descent<K: Key, V, const M: usize, A: NodeAllocator<K, V, M> = Global> {
+pub(crate) struct Descent<
+    K: Key,
+    V,
+    const M: usize,
+    A: NodeAllocator<K, V, M> = Global,
+    const H: usize = DEFAULT_MAX_LEVELS,
+> {
     /// The descended tree, as the raw handle every other pointer here
     /// descends from. The `commit_*` methods reach the tree's own fields
     /// through this: the scalars (`height`, `len`) via raw projections
     /// disjoint from every recorded pointer's pointee, the `allocator`
     /// (shared, never written) likewise, and the `root` slot only after
     /// the path's last use.
-    tree: NonNull<BPlusTree<K, V, M, A>>,
+    tree: NonNull<BPlusTree<K, V, M, A, H>>,
     /// The recorded path (see [`TreePath`]); slots `1..=tree.height` are
     /// initialized. Private to this module: only the `commit_*` methods
     /// replay it.
-    path: TreePath<K, V, M>,
+    path: TreePath<K, V, M, H>,
     /// The leaf the descent landed at.
     pub(crate) leaf: NonNull<Leaf<K, V, M>>,
     /// `key`'s slot in that leaf, per [`Leaf::find_key`]: the match if
@@ -55,7 +62,9 @@ pub(crate) struct Descent<K: Key, V, const M: usize, A: NodeAllocator<K, V, M> =
 // scalars (`height`, `len`) via projections disjoint from every
 // recorded pointer's pointee, and the `root` slot only after the
 // path's last use.
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> Descent<K, V, M, A> {
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    Descent<K, V, M, A, H>
+{
     /// Commit a replacement, consuming the descent.
     ///
     /// Safety:
@@ -258,7 +267,9 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> Descent<K, V, M
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V, M, A> {
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    BPlusTree<K, V, M, A, H>
+{
     /// Descend from the root to the leaf, determining the path by appling `f`
     /// to each inner node. Recording the path — each visited inner node and
     /// the child index routed through — in `path[h]` for every inner level
@@ -268,7 +279,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     fn descend_recording_with(
         &mut self,
         f: impl Fn(&Inner<K, V, M>) -> usize,
-        path: &mut TreePath<K, V, M>,
+        path: &mut TreePath<K, V, M, H>,
     ) -> NonNull<Node<K, V, M>> {
         let mut height = self.height as usize;
         let mut node = NonNull::from_mut(&mut self.root);
@@ -304,9 +315,9 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     pub(crate) fn descend_into_with<'s>(
         &mut self,
         f: impl Fn(&Inner<K, V, M>) -> usize,
-        slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
-    ) -> &'s mut Descent<K, V, M, A> {
-        let mut tree: NonNull<BPlusTree<K, V, M, A>> = NonNull::from_mut(self);
+        slot: &'s mut MaybeUninit<Descent<K, V, M, A, H>>,
+    ) -> &'s mut Descent<K, V, M, A, H> {
+        let mut tree: NonNull<BPlusTree<K, V, M, A, H>> = NonNull::from_mut(self);
 
         // Initialize field by field, in place: writing a whole `Descent`
         // value into the slot would be exactly the copy this out-param
@@ -351,8 +362,8 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     pub(crate) fn descend_into<'s>(
         &mut self,
         key: &K,
-        slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
-    ) -> &'s mut Descent<K, V, M, A> {
+        slot: &'s mut MaybeUninit<Descent<K, V, M, A, H>>,
+    ) -> &'s mut Descent<K, V, M, A, H> {
         let descent = self.descend_into_with(|inner| inner.child_idx_for_key(key), slot);
 
         (descent.partition, descent.exact) = unsafe { descent.leaf.as_ref() }.probe(key);
@@ -366,8 +377,8 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     #[track_caller]
     pub(crate) fn descend_into_first<'s>(
         &mut self,
-        slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
-    ) -> &'s mut Descent<K, V, M, A> {
+        slot: &'s mut MaybeUninit<Descent<K, V, M, A, H>>,
+    ) -> &'s mut Descent<K, V, M, A, H> {
         let descent = self.descend_into_with(|_| 0, slot);
         descent.partition = 0;
         descent.exact = true;
@@ -380,8 +391,8 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
     #[track_caller]
     pub(crate) fn descend_into_last<'s>(
         &mut self,
-        slot: &'s mut MaybeUninit<Descent<K, V, M, A>>,
-    ) -> &'s mut Descent<K, V, M, A> {
+        slot: &'s mut MaybeUninit<Descent<K, V, M, A, H>>,
+    ) -> &'s mut Descent<K, V, M, A, H> {
         let descent = self.descend_into_with(|inner| inner.len() - 1, slot);
         descent.partition = unsafe { descent.leaf.as_ref().len() - 1 };
         descent.exact = true;

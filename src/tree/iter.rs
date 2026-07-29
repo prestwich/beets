@@ -37,13 +37,17 @@ pub type FullIterator<'a, K, V, const M: usize> = Full<Iterator<'a, K, V, M>>;
 pub type FullIteratorMut<'a, K, V, const M: usize> = Full<IteratorMut<'a, K, V, M>>;
 
 impl<'a, K: Key, V, const M: usize> FullIterator<'a, K, V, M> {
-    pub(crate) fn new<A: NodeAllocator<K, V, M>>(tree: &'a BPlusTree<K, V, M, A>) -> Self {
+    pub(crate) fn new<A: NodeAllocator<K, V, M>, const H: usize>(
+        tree: &'a BPlusTree<K, V, M, A, H>,
+    ) -> Self {
         Self { len: tree.len(), inner: Iterator::from_start(tree) }
     }
 }
 
 impl<'a, K: Key, V, const M: usize> FullIteratorMut<'a, K, V, M> {
-    pub(crate) fn new<A: NodeAllocator<K, V, M>>(tree: &'a mut BPlusTree<K, V, M, A>) -> Self {
+    pub(crate) fn new<A: NodeAllocator<K, V, M>, const H: usize>(
+        tree: &'a mut BPlusTree<K, V, M, A, H>,
+    ) -> Self {
         Self { len: tree.len(), inner: IteratorMut::from_start(tree) }
     }
 }
@@ -90,8 +94,8 @@ impl<'a, K: Key, V, const M: usize> IteratorMut<'a, K, V, M> {
     }
 
     /// Start at the tree's first pair.
-    pub(crate) fn from_start<A: NodeAllocator<K, V, M>>(
-        tree: &'a mut BPlusTree<K, V, M, A>,
+    pub(crate) fn from_start<A: NodeAllocator<K, V, M>, const H: usize>(
+        tree: &'a mut BPlusTree<K, V, M, A, H>,
     ) -> Self {
         Self::new(tree.first_leaf_mut(), 0)
     }
@@ -149,8 +153,8 @@ pub type RangeMut<'a, K, V, const M: usize> = Bounded<IteratorMut<'a, K, V, M>, 
 impl<'a, K: Key, V, const M: usize> Range<'a, K, V, M> {
     /// Resolve `range`'s bounds against `tree`: position the cursor at
     /// the first in-range pair and store the end bound.
-    pub(crate) fn new<R: core::ops::RangeBounds<K>, A: NodeAllocator<K, V, M>>(
-        tree: &'a BPlusTree<K, V, M, A>,
+    pub(crate) fn new<R: core::ops::RangeBounds<K>, A: NodeAllocator<K, V, M>, const H: usize>(
+        tree: &'a BPlusTree<K, V, M, A, H>,
         range: R,
     ) -> Self {
         let start = range.start_bound();
@@ -177,8 +181,8 @@ impl<'a, K: Key, V, const M: usize> Range<'a, K, V, M> {
 impl<'a, K: Key, V, const M: usize> RangeMut<'a, K, V, M> {
     /// Resolve `range`'s bounds against `tree`: position the cursor at
     /// the first in-range pair and store the end bound.
-    pub(crate) fn new<R: core::ops::RangeBounds<K>, A: NodeAllocator<K, V, M>>(
-        tree: &'a mut BPlusTree<K, V, M, A>,
+    pub(crate) fn new<R: core::ops::RangeBounds<K>, A: NodeAllocator<K, V, M>, const H: usize>(
+        tree: &'a mut BPlusTree<K, V, M, A, H>,
         range: R,
     ) -> Self {
         let start = range.start_bound();
@@ -233,7 +237,9 @@ impl<'a, K: Key, V, const M: usize> Iterator<'a, K, V, M> {
     }
 
     /// Instantiate a new iterator.
-    pub(crate) fn from_start<A: NodeAllocator<K, V, M>>(tree: &'a BPlusTree<K, V, M, A>) -> Self {
+    pub(crate) fn from_start<A: NodeAllocator<K, V, M>, const H: usize>(
+        tree: &'a BPlusTree<K, V, M, A, H>,
+    ) -> Self {
         Self { current: Some(tree.first_leaf()), idx_in_leaf: 0 }
     }
 }
@@ -269,8 +275,8 @@ impl<'a, K: Key, V, const M: usize> core::iter::Iterator for Iterator<'a, K, V, 
 // Exhaustion is terminal: the cursor parks on `current: None`.
 impl<K: Key, V, const M: usize> core::iter::FusedIterator for Iterator<'_, K, V, M> {}
 
-impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> IntoIterator
-    for &'a BPlusTree<K, V, M, A>
+impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> IntoIterator
+    for &'a BPlusTree<K, V, M, A, H>
 {
     type Item = (&'a K, &'a V);
 
@@ -281,8 +287,8 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> IntoIterator
     }
 }
 
-impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> IntoIterator
-    for &'a mut BPlusTree<K, V, M, A>
+impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> IntoIterator
+    for &'a mut BPlusTree<K, V, M, A, H>
 {
     type Item = (&'a K, &'a mut V);
 

@@ -251,7 +251,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     /// Split the occupied pairs from index `from` onward into per-pair
     /// iterators — keys shared, values mutable — zipped. The two arrays
     /// are disjoint fields, so the borrows coexist, and the zip's items
-    /// are the disjoint `(&K, &mut V)` borrows [`IteratorMut`](crate::iter::IteratorMut) yields: one
+    /// are the disjoint `(&K, &mut V)` borrows [`IteratorMut`](crate::tree::iter::IteratorMut) yields: one
     /// whole-leaf `&mut` is spent here, then never re-created over pairs
     /// already handed out.
     ///
