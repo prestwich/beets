@@ -440,15 +440,9 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> Extend<(K, V)>
     }
 }
 
-// The testutils surface (the differential harness plus the invariant
-// net and its node-level views) lives under this module so it can reach
-// the tree's private fields; `lib.rs` re-exports it as `crate::harness`
-// for the in-crate tests and, under the `testutils` feature, the fuzz
-// targets.
+// Under plain `testutils` (the fuzz targets' build, no `cfg(test)`)
+// this module is just the harness's test-only views into the private
+// fields; the contract tests inside are `#[cfg(test)]`-gated.
 #[cfg(any(test, feature = "testutils"))]
-#[path = "../tests/harness.rs"]
-pub mod harness;
-
-#[cfg(test)]
 #[path = "../tests/tree.rs"]
 mod tests;

@@ -384,7 +384,16 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         self.child_count -= 1;
     }
 
-    pub(crate) fn rebalance<A: NodeAllocator<K, V, M>>(
+    /// Rebalance the deficient child at index `child_idx` by either
+    /// - moving a child from its right sibling
+    /// - moving a child from its left sibling
+    /// - merging it into its right sibling
+    /// - merging it into its left sibling
+    ///
+    /// # Safety
+    ///
+    /// Height MUST be correct.
+    pub(crate) unsafe fn rebalance<A: NodeAllocator<K, V, M>>(
         &mut self,
         height: u8,
         child_idx: usize,
@@ -415,9 +424,10 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         // plumbing.
 
         // right sibling exists, and would not be made deficient.
+
+        // SAFETY: the guard keeps the index in the live range, and
+        // the sibling roots a subtree of height `height - 1`.
         if child_idx + 1 < self.child_count
-            // SAFETY: the guard keeps the index in the live range, and
-            // the sibling roots a subtree of height `height - 1`.
             && unsafe { self.children_ref()[child_idx + 1].len(height - 1) } > Self::MIN_OCCUPANCY
         {
             let sep = self.keys_ref()[child_idx];
@@ -432,8 +442,8 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         }
 
         // left sibling exists, and would not be made deficient.
+        // SAFETY: as the right-sibling probe above, mirrored.
         if child_idx > 0
-            // SAFETY: as the right-sibling probe above, mirrored.
             && unsafe { self.children_ref()[child_idx - 1].len(height - 1) } > Self::MIN_OCCUPANCY
         {
             let sep = self.keys_ref()[child_idx - 1];
@@ -813,6 +823,8 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
     /// - Both nodes' children root subtrees of equal height.
     /// - `self.child_count < M` and `left.child_count >= 2`.
     pub(crate) unsafe fn rotate_from_left(&mut self, sep: K, left: &mut Self) -> K {
+        debug_assert!(self.child_count < M);
+        debug_assert!(left.child_count >= 2);
         // SAFETY: `self` has room (`child_count < M`, contract) and its
         // slots `0..child_count` are initialized; the overlapping shift
         // is `ptr::copy`, and the vacated slot 0 is overwritten below.
@@ -820,12 +832,16 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
             shift_run!(self, 0 => 1; self.child_count);
         }
 
+        // Write the old separator to the our first key slot.
         self.keys[0].write(sep);
+
         // SAFETY: the donor has >= 2 children (contract), so its last
         // child is live; the count decrement below retires the slot, so
         // the handle moves exactly once.
-        self.children[0].write(unsafe { left.children[left.child_count - 1].assume_init_read() });
+        let last_left = unsafe { left.children[left.child_count - 1].assume_init_read() };
+        self.children[0].write(last_left);
 
+        // Promote the last left key to new separator.
         // SAFETY: the donor has at least 2 children, so its last key is live.
         let promotion = unsafe { left.keys[left.key_count() - 1].assume_init_read() };
 

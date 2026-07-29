@@ -87,13 +87,16 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         // repeat the identical search.
         let child_idx = self.child_idx_for_key(key);
         let child = &mut self.children_mut()[child_idx];
+
         // SAFETY:
         // Same safety assumptions documented on the function.
         let val = unsafe { child.remove(height - 1, key, alloc) };
 
         // SAFETY: height propagation.
-        if unsafe { child.is_deficient(height - 1) } {
-            self.rebalance(height, child_idx, alloc);
+        unsafe {
+            if child.is_deficient(height - 1) {
+                self.rebalance(height, child_idx, alloc);
+            }
         }
 
         val

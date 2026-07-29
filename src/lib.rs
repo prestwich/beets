@@ -55,20 +55,16 @@ pub use key::Key;
 
 mod tree;
 pub use tree::BPlusTree;
-// `pub` (not `pub(crate)`) so allocator bounds can name the node types:
-// `A: SlotAllocator<Leaf<..>> + SlotAllocator<Inner<..>>` appears in the
-// tree's public interface. The types are opaque — every field and method
-// stays `pub(crate)` — they exist publicly only to be named.
-pub(crate) use tree::Node;
+pub(crate) use tree::{Inner, Leaf, Node};
+
 #[cfg(debug_assertions)]
 pub(crate) use tree::NodeKind;
-#[doc(hidden)]
-pub use tree::{Inner, Leaf};
-// The testutils surface (differential harness + invariant net); lives
-// under `tree` for private-field access, surfaces here as
-// `crate::harness` for the in-crate tests and the fuzz targets.
+
+/// Test utils. Primarily a harness, and methods for asserting invariants about
+/// tree structure.
 #[cfg(any(test, feature = "testutils"))]
-pub use tree::harness;
+#[path = "tests/harness.rs"]
+pub mod harness;
 
 /// The target size of a node's key allocation, in bytes.
 const NODE_BUDGET: usize = 512;

@@ -13,8 +13,8 @@
 //! The invariant net lives here too (the bottom half of this file):
 //! [`BPlusTree::check`] and the recursive [`Node::check_invariants`]
 //! walk it delegates to, plus the raw key/child views they read. The
-//! module is mounted under `tree` so the net can reach the tree's
-//! private fields.
+//! net reaches tree internals through the crate's test-only views
+//! (`BPlusTree::test_root` and friends), not private fields.
 //!
 //! Only compiled for tests and under the `testutils` feature — this is
 //! not public API and is exempt from semver.
@@ -120,7 +120,7 @@ fn net<K: Key + Ord, V, const N: usize, A: NodeAllocator<K, V, N>>(
     mutations: &mut usize,
 ) {
     *mutations += 1;
-    if !cfg!(miri) || *mutations % 16 == 0 {
+    if !cfg!(miri) || (*mutations).is_multiple_of(16) {
         tree.check();
     }
 }
@@ -474,20 +474,21 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>> BPlusTree<K, V,
             return;
         }
 
-        let (_, first, last) = unsafe { self.root.check_invariants(self.height, true) };
+        let (_, first, last) =
+            unsafe { self.test_root().check_invariants(self.test_height(), true) };
 
         let mut total = 0;
         let mut hops = 0;
         let mut cur = Some(first);
         while let Some(ptr) = cur {
             hops += 1;
-            assert!(hops <= self.len + 1, "the leaf chain must terminate within the tree's size");
+            assert!(hops <= self.len() + 1, "the leaf chain must terminate within the tree's size");
             // SAFETY: every leaf on a valid tree's chain is live.
             let leaf = unsafe { ptr.as_ref() };
             total += leaf.len();
             cur = leaf.next();
         }
-        assert_eq!(total, self.len, "tree.len must equal the pairs actually on the chain");
+        assert_eq!(total, self.len(), "tree.len must equal the pairs actually on the chain");
         // SAFETY: `last` is the walk's final live leaf.
         assert_eq!(
             unsafe { last.as_ref() }.next(),

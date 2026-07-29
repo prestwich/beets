@@ -13,11 +13,26 @@
 //! plus the two facts only this layer can vouch for — `len` equals the
 //! pairs on the chain, and the chain terminates at the last leaf.
 
+#[cfg(test)]
 use alloc::sync::Arc;
+#[cfg(test)]
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;
+#[cfg(test)]
 use crate::test_util::{Counted, IMIN, LMIN, M, counted_leaf, minimal_inner, v, xorshift};
+
+/// Test-only views into the tree's private fields, for the invariant
+/// net (`crate::harness`), which lives outside the `tree` module.
+impl<K: Key, V, const N: usize, A: NodeAllocator<K, V, N>> BPlusTree<K, V, N, A> {
+    pub(crate) fn test_root(&self) -> &Node<K, V, N> {
+        &self.root
+    }
+
+    pub(crate) fn test_height(&self) -> u8 {
+        self.height
+    }
+}
 
 /// Delegate methods on [`Node`] to the leaf that owns the key, threading the
 /// subtree height down the descent: at `height == 0` the node is cast to
@@ -37,6 +52,7 @@ use crate::test_util::{Counted, IMIN, LMIN, M, counted_leaf, minimal_inner, v, x
 /// which consumes a same-kind sibling) can't be delegated this way — the
 /// same-kind argument or result needs erasing into a `Node`. Those are
 /// written out by hand below.
+#[cfg(test)]
 macro_rules! delegate {
     () => {};
     (
@@ -91,6 +107,7 @@ macro_rules! delegate {
     };
 }
 
+#[cfg(test)]
 impl<K: Key, V, const M: usize> Node<K, V, M> {
     delegate! {
         /// Get a reference to a value in the subtree rooted at this node, if
@@ -157,6 +174,7 @@ fn drop_subtree_at_height_zero_drops_the_leafs_values_exactly_once() {
 /// cross-module net (the structural walk plus the tree-layer
 /// bookkeeping only `BPlusTree` can vouch for). Kept as a free
 /// function so this module's many call sites read unchanged.
+#[cfg(test)]
 fn check_tree<K: Key + Ord, V, const N: usize, A: NodeAllocator<K, V, N>>(
     tree: &BPlusTree<K, V, N, A>,
 ) {
@@ -640,6 +658,7 @@ const _: () = assert!(<[u8; 121] as Key>::FANOUT == 3);
 const _: () = assert!(<[u8; 120] as Key>::FANOUT == 4);
 const _: () = assert!(<[u8; 94] as Key>::FANOUT == 5);
 
+#[cfg(test)]
 fn bkey<const S: usize>(k: u8) -> [u8; S] {
     [k; S]
 }
@@ -651,6 +670,7 @@ fn bkey<const S: usize>(k: u8) -> [u8; S] {
 /// key served, then a differently-shuffled drain back to the empty
 /// root leaf, with the invariant net thrown repeatedly and values
 /// dropping exactly once.
+#[cfg(test)]
 fn lifecycle_at_fanout<K: Key + Ord, const N: usize>(mk: impl Fn(u8) -> K, min_height: u8) {
     const KEYS: usize = 120;
     let live = Arc::new(AtomicIsize::new(0));
@@ -798,12 +818,15 @@ fn churn_mirrors_btreemap_across_seeds() {
 // agrees with `BTreeMap`, and the invariant net holds after every
 // mutation.
 
+#[cfg(test)]
 use proptest::prelude::*;
 
+#[cfg(test)]
 use crate::harness::{Op, run_differential, wide};
 
 /// Keys mostly from a small domain, so collisions, replacements, and
 /// re-inserts of removed keys actually happen.
+#[cfg(test)]
 fn key_strategy() -> impl Strategy<Value = u64> + Clone {
     prop_oneof![3 => 0u64..64, 1 => any::<u64>()]
 }
@@ -812,6 +835,7 @@ fn key_strategy() -> impl Strategy<Value = u64> + Clone {
 /// the full observable surface sprinkled in: point reads, mutable
 /// reads, bounded and full iteration (shared and mutable), and the
 /// occasional clear.
+#[cfg(test)]
 fn op_strategy() -> impl Strategy<Value = Op> + Clone {
     prop_oneof![
         40 => (key_strategy(), any::<u64>()).prop_map(|(k, v)| Op::Insert(k, v)),
@@ -831,6 +855,7 @@ fn op_strategy() -> impl Strategy<Value = Op> + Clone {
 /// Bulk-load seed sizes: deep enough to start above height 0, small
 /// enough that the per-mutation invariant net stays affordable
 /// (especially under Miri).
+#[cfg(test)]
 fn seed_strategy() -> impl Strategy<Value = u64> + Clone {
     0u64..if cfg!(miri) { 48 } else { 768 }
 }
@@ -1002,6 +1027,7 @@ fn first_and_last_leaf_track_removes() {
     assert_eq!(*first.first_key(), lo, "the survivor must be the middle key");
 }
 
+#[cfg(test)]
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: if cfg!(miri) { 2 } else { 256 },
