@@ -34,11 +34,7 @@ use crate::{
 /// This type exists to ensure leaves cannot be leaked by panics during bulk
 /// loading: it holds (a shared handle to) the allocator the leaf came
 /// from, so its [`Drop`] can return the slot while the loader goes on
-/// allocating through the same allocator. [`SlotAllocator`]'s receivers
-/// are `&mut self`, and guards, adapter, and treepath all hold the
-/// allocator at once — the [`RefCell`] is what reconciles the two,
-/// lending each access a transient exclusive borrow (see the borrow
-/// discipline note in [`BPlusTree::from_sorted_iter_in`]).
+/// allocating through the same allocator.
 pub(crate) struct Unyielded<'a, K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>>(
     NonNull<Leaf<K, V, M>>,
     &'a RefCell<A>,
@@ -217,6 +213,10 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     /// level's held-back node, which climbs to level `h + 1` — [`insert`](BPlusTree::insert)'s
     /// split cascade, inverted. Amortized O(1): level `h` is touched once
     /// per `Mʰ` pushes.
+    ///
+    /// Panics — leak-free, see the assert below — if the carry would
+    /// open level `H - 1`: the level-cap contract, under which the
+    /// finished tree may occupy at most `H` levels.
     fn push(&mut self, mut height: usize, mut key: K, mut node: Node<K, V, M>) {
         // Copied out (`&'a RefCell<A>` is `Copy`) so the level borrow
         // below and the allocator can be used together.
@@ -234,6 +234,12 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
                 // `Inner` containing the incoming node as its first child.
                 lvl.current =
                     Some((key, alloc.borrow_mut().allocate(Inner::from_first_child(node))));
+                // Occupying level `H - 1` would stand the finished tree at `H
+                // + 1` levels. This would
+                assert!(
+                    height < H - 1,
+                    "bulk load would exceed the level cap H. HINT: the `H` paramater on the tree is not sufficient to hold the number of leaves you're loading."
+                );
                 return;
             };
 
@@ -314,9 +320,23 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
                 }
             }
 
+            // In-bounds by the level cap: occupied levels stop at `H - 2`
+            // (the refusals here and in `push`), so `h + 1` tops out at
+            // `H - 1` — the top slot never holds a chunk and serves as
+            // the fold's always-empty lookahead.
+            let above_untouched = self[h + 1].pending.is_none() && self[h + 1].current.is_none();
+            let lvl = &mut self[h];
+            // The fold's level-cap refusal, BEFORE the level's chunks move
+            // into locals: residue that must climb into level `h + 1`
+            // roots the tree at height `h + 2` or more. Refusing while
+            // every chunk still sits in the treepath lets its `Drop`
+            // reclaim them on unwind — `push`'s own refusal would fire
+            // one chunk too late, with the already-taken sibling
+            // unwinding as a raw, glue-free handle: a leak.
+            let will_climb = lvl.pending.is_some() && (lvl.current.is_some() || !above_untouched);
+            assert!(!will_climb || h + 1 < H - 1, "bulk load would exceed the level cap H");
             let pending = lvl.pending.take();
             let current = lvl.current.take();
-            let above_untouched = self[h + 1].pending.is_none() && self[h + 1].current.is_none();
             match (pending, current) {
                 // The level's lone node is the root. It never filled, so
                 // it never carried — nothing can live above it.
@@ -364,18 +384,18 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     /// until a level is a single node — the root.
     ///
     /// The whole load is streaming and allocates nothing beyond the
-    /// tree's own nodes: per-level state lives in a pre-allocated treepath
-    /// of per-level slots (`LevelState`) — the same shape as [`insert`](BPlusTree::insert)'s
-    /// descent stack — and each level holds back one completed node so a
-    /// short tail can borrow from its left neighbor, keeping every
-    /// non-root node at or above its occupancy minimum. Live memory is
-    /// O(M · height).
+    /// tree's own nodes. Live memory is O(M · H).
     ///
     /// # Panics
     ///
+    /// Panics if the loaded tree would occupy more than `H` levels —
+    /// the level cap (see [`BPlusTree`]'s type-level docs). The refusal
+    /// unwinds cleanly: every value already drawn from the stream is
+    /// dropped exactly once.
+    ///
     /// Debug builds assert that the keys are strictly ascending (no
-    /// duplicates). Release builds skip the checks and quietly build a
-    /// tree that misroutes lookups — the order is the caller's contract.
+    /// duplicates). Release builds skip the checks and quietly builds an
+    /// incorrect tree that misroutes lookups.
     pub fn from_sorted_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self
     where
         A: Default,

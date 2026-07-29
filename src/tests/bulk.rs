@@ -230,14 +230,35 @@ fn loader_scratch_scales_with_h() {
     );
 }
 
-/// A load that needs more inner levels than the cap provides must
-/// panic mid-load instead of writing past the treepath. At the minimum
-/// fanout (3), 54 pairs already build a height-3 tree — one inner
-/// level more than `H = 2` provides.
+/// A load that needs more levels than the cap provides must refuse —
+/// with the level-cap message, not an incidental index panic. At the
+/// minimum fanout (3), 54 pairs stand three levels or more — past
+/// what `H = 2` admits.
 #[test]
-#[should_panic]
+#[should_panic(expected = "bulk load would exceed the level cap H")]
 fn loading_past_the_cap_panics() {
     let n: u64 = 54;
     let _tree: BPlusTree<[u8; 121], u64, 3, crate::Slabs<[u8; 121], u64, 3>, 2> =
         BPlusTree::from_sorted_iter((0..n).map(|k| (crate::harness::wide(k), k)));
+}
+
+/// The fullest load the cap admits — exactly `M` packed leaves under
+/// one root, standing `H - 1` high — must build and serve like any
+/// other tree: reads, the invariant net, and in-cap mutations all work.
+#[test]
+fn loading_at_the_cap_boundary_builds_a_full_height_tree() {
+    let mut tree: BPlusTree<[u8; 121], u64, 3, crate::Slabs<[u8; 121], u64, 3>, 2> =
+        BPlusTree::from_sorted_iter((0..9u64).map(|k| (crate::harness::wide(k), k)));
+    assert_eq!(tree.test_height(), 1, "three packed leaves stand exactly one inner level high");
+    tree.check();
+    assert_eq!(tree.len(), 9, "len must count every drained pair");
+    for k in 0..9u64 {
+        assert_eq!(tree.get(&crate::harness::wide(k)), Some(&k), "every loaded pair must read");
+    }
+    assert_eq!(
+        tree.remove(&crate::harness::wide(4)),
+        Some(4),
+        "a boundary-height tree must still mutate within its cap"
+    );
+    tree.check();
 }

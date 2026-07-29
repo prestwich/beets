@@ -18,7 +18,7 @@ use std::{
     },
 };
 
-use crate::BPlusTree;
+use crate::{BPlusTree, Slabs, harness::wide};
 use common::{Counted, M};
 
 /// Run a bulk load whose source panics just before yielding pair
@@ -82,4 +82,45 @@ fn a_panic_deep_in_a_multi_level_load_leaks_nothing() {
     assert_no_leak(m2 + m + 2);
     assert_no_leak(2 * m2 + 3 * m + 5);
     assert_no_leak(m3 + m2 + 2);
+}
+
+/// Run a bulk load of `n` pairs into a level-capped tree (fanout 3,
+/// `H = 2` — two levels, so at most three packed leaves under one
+/// root), catch the loader's over-cap refusal, and return the
+/// live-value counter — which the contract says must be back at zero.
+fn live_after_overcap_load(n: u64) -> isize {
+    let live = Arc::new(AtomicIsize::new(0));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _tree: BPlusTree<[u8; 121], Counted, 3, Slabs<[u8; 121], Counted, 3>, 2> =
+            BPlusTree::from_sorted_iter((0..n).map(|k| (wide(k), Counted::new(k, &live))));
+    }));
+    assert!(result.is_err(), "an over-cap load must panic");
+    live.load(Relaxed)
+}
+
+/// The loader's own level-cap refusal is a mid-load panic like any
+/// other: unwinding must drop every already-drawn value exactly once.
+/// Sized so the refusal fires while pairs are still streaming — the
+/// climb out of a completed second chunk is what exceeds the cap.
+#[test]
+fn an_overcap_refusal_mid_stream_leaks_nothing() {
+    assert_eq!(
+        live_after_overcap_load(54),
+        0,
+        "an over-cap load must drop every already-drawn value exactly once \
+         on unwind (positive = leak, negative = double-drop)"
+    );
+}
+
+/// As above, but sized so the stream itself fits the treepath and only
+/// the finish-time fold — emitting the held-back chunk and its short
+/// tail upward — is what would exceed the cap.
+#[test]
+fn an_overcap_refusal_in_the_finishing_fold_leaks_nothing() {
+    assert_eq!(
+        live_after_overcap_load(12),
+        0,
+        "an over-cap load must drop every already-drawn value exactly once \
+         on unwind (positive = leak, negative = double-drop)"
+    );
 }
