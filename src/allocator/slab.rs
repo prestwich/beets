@@ -3,13 +3,9 @@
 //! # Design
 //!
 //! A [`SlabAlloc<T>`] owns a chain of SLABS — each one heap allocation
-//! holding a small header and `slab_capacity` slots. Slabs are born when
-//! allocation outruns capacity, are NEVER moved or shrunk, and are freed
-//! only when the allocator drops: a slot's address is stable for its
-//! whole allocate→deallocate life, which is the [`SlotAllocator`] contract
-//! the tree's [`NonNull`]s ride on. (Consequence, accepted: an emptied
-//! slab is not returned to the OS — memory holds its high-water mark
-//! until the allocator drops.)
+//! in `A`, holding a small header and `slab_capacity` slots. Slabs are born
+//! when allocation outruns capacity, are NEVER moved or shrunk. A slot's
+//! address is stable for its whole allocate→deallocate life.
 //!
 //! Retired slots form an INTRUSIVE free list: a freed slot's own storage
 //! holds the link to the next free slot (the [`Slot<T>`](Slot) union below), so
@@ -18,40 +14,33 @@
 //! list if it can, else bumps the newest slab's never-used tail, else
 //! grows by one slab.
 //!
-//! The pools' bookkeeping (slab chain, free list, bump window) lives in
-//! plain fields behind the trait's `&mut self` receivers — no interior
-//! mutability anywhere. What still suppresses the auto traits is the
-//! `NonNull`s that bookkeeping is made of, so thread affordances are
-//! manual impls with contracts: [`Slabs`] is [`Send`] and [`Sync`] by
-//! the impls below, and the tree's own impls ride on them.
+//! # `unsafe impl Send/Sync`
+//!
+//! Slabs has no interior mutability. What still suppresses the auto traits is
+//! the [`NonNull`]s tracking slab and slot locations. These locations are
+//! stable, and pointer access is unsafe. Therefore [`Slabs`] is [`Send`] and
+//! [`Sync`] by the impls below.
 //!
 //! # Safety invariants
 //!
 //! - Every slot pointer handed out derives from its slab's single
 //!   allocation; slab headers and their slot arrays live in that one
 //!   allocation (header first, slots trailing — see
-//!   [`slab_layout`](SlabAlloc::slab_layout)).
-//!   No pointer is ever offset across slabs (`offset_from` between
+//!   [`SlabAlloc::slab_layout`].
+//! - No pointer is ever offset across slabs (`offset_from` between
 //!   slabs is UB; nothing here needs it).
 //! - A slot is in exactly one state: LIVE (holds a `T` the caller owns),
-//!   FREE (holds a `next_free` link, on the free list), or VIRGIN (in
+//!   FREE (holds a `next_free` link, on the free list), or NEVER-USED (in
 //!   the newest slab's untouched tail, no bytes initialized). State
-//!   changes only at [`allocate`](SlotAllocator::allocate) (free/virgin → live) and
+//!   changes only at [`allocate`](SlotAllocator::allocate)
+//!   (free/never-used → live) and
 //!   [`deallocate`](SlotAllocator::deallocate) (live → free).
 //! - Drop frees slab memory only. It must not read slots: any still-live
 //!   `T` is the caller's teardown bug (the tree drops values via
-//!   [`drop_subtree`](crate::Node::drop_subtree) before its allocator field drops).
+//!   [`drop_subtree`](crate::Node::drop_subtree) before its allocator
+//!   field drops).
 //!
-//! # Test contracts to pin (under `cargo test` AND `cargo miri test`)
-//!
-//! - allocate/deallocate round-trips the value; addresses stay stable
-//!   and distinct across growth (fill several slabs, then revisit).
-//! - a freed slot is reused before any virgin slot (free list first).
-//! - teardown after mixed alloc/dealloc traffic frees every slab
-//!   exactly once and touches no live `T` (Counted + miri leak check).
-//! - `contains` accepts every live pointer and rejects foreign ones.
-//!
-//! # Provenance
+//! # Code Provenance
 //!
 //! I really liked reading [`slabbin`] while writing this.
 //!
@@ -90,43 +79,46 @@ pub(crate) struct SlabHeader<T> {
 /// A stable-address slab allocator for `T`-slots. See the module docs
 /// for the design; see [`SlotAllocator`] for the contract it implements.
 pub(crate) struct SlabAlloc<T, A: GlobalAlloc = Global> {
-    /// Head of the slab chain (newest first) — the teardown walk.
+    /// Head of the slab chain (newest first).
     slabs: Option<NonNull<SlabHeader<T>>>,
+
     /// Head of the intrusive free list of retired slots.
     free_list: Option<NonNull<Slot<T>>>,
-    /// The newest slab's virgin tail: next never-used slot, and the
-    /// one-past-the-end fence. `bump_next == bump_end` means no virgin
-    /// slots remain (also the empty-allocator state).
-    bump_next: Option<NonNull<Slot<T>>>,
-    bump_end: Option<NonNull<Slot<T>>>,
+
+    /// The newest slab's never-used tail. The range is half-open, i.e.
+    /// `bump_range.end` is AFTER the end of the allocation.
+    bump_range: core::ops::Range<NonNull<Slot<T>>>,
+
     /// Slots per slab, fixed at construction.
     slab_capacity: usize,
 
-    /// Allocator.
+    /// Allocator, used to allocate new slabs..
     // DO NOT REORDER THIS FIELD.
     alloc: A,
 }
 
 impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     /// An empty allocator that will grow in slabs of `slab_capacity`
-    /// slots. Allocates nothing until the first [`allocate`](SlotAllocator::allocate).
+    /// slots. Allocates nothing until the first
+    /// [`allocate`](SlotAllocator::allocate).
     ///
     /// Capacity guidance: size slabs to a byte budget (a few pages,
     /// e.g. 64 KiB) rather than a slot count — [`Slabs`] below does
     /// this for both node types.
-    ///
-    /// # Panics
-    ///
-    /// If `slab_capacity` is 0.
     pub const fn new_in(slab_capacity: usize, alloc: A) -> Self {
-        assert!(slab_capacity > 0);
-
-        Self { slabs: None, free_list: None, bump_next: None, bump_end: None, slab_capacity, alloc }
+        Self {
+            slabs: None,
+            free_list: None,
+            bump_range: NonNull::dangling()..NonNull::dangling(),
+            slab_capacity,
+            alloc,
+        }
     }
 
+    /// Iterate over the slabs.
     fn iter_slabs(&self) -> impl Iterator<Item = NonNull<SlabHeader<T>>> {
         // SAFETY:
-        // Slab list always contains only valid slabs.
+        // Slab list always contains only valid, initalized slabs.
         core::iter::successors(self.slabs, |f| unsafe { f.as_ref() }.next)
     }
 
@@ -140,7 +132,8 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
         let next = self.free_list?;
 
         // SAFETY:
-        // free list always contains only valid free nodes. Never contains data.
+        // free list always contains only valid free node pointers. Never
+        // contains data.
         self.free_list = unsafe { next.as_ref().next_free };
 
         Some(next.cast())
@@ -149,32 +142,34 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     /// Get a free bump slot. Caller is responsible for ensuring the slot does
     /// not get leaked.
     unsafe fn take_bump(&mut self) -> Option<NonNull<T>> {
-        self.bump_next.map(|available| {
-            // unwrap is okay, as we never have start without end.
-            let end = self.bump_end.unwrap();
-            // SAFETY: `bump_end` is one-past-the-end of the newest slab's
-            // slot array and `slab_capacity >= 1`, so one step back stays
-            // within the same allocation.
-            let last = unsafe { end.sub(1) };
-            if available == last {
-                self.bump_end = None;
-                self.bump_next = None;
-            } else {
-                // SAFETY: if statement above checks that add(1) is in the
-                // Slab allocation
-                self.bump_next = Some(unsafe { available.add(1) });
-            }
-            available.cast()
-        })
+        if self.bump_range.is_empty() {
+            return None;
+        };
+
+        let available = self.bump_range.start;
+        let end = self.bump_range.end;
+
+        // SAFETY: `bump_end` is one-past-the-end of the newest slab's
+        // slot array and `slab_capacity >= 1`, so one step back stays
+        // within the same allocation.
+        let last = unsafe { end.sub(1) };
+        if available == last {
+            self.bump_range = NonNull::dangling()..NonNull::dangling();
+        } else {
+            // SAFETY: if statement above checks that add(1) is in the
+            // Slab allocation
+            self.bump_range.start = unsafe { available.add(1) };
+        }
+        Some(available.cast())
     }
 
-    /// Pop the free list; else take the next virgin slot; else
-    /// [`grow()`](Self::grow) and take. Write `value` into the slot and hand out
-    /// the (stable) pointer.
+    /// Pop the free list; else take the next never-used slot; else
+    /// [`grow()`](Self::grow) and take. Write `value` into the slot and hand
+    /// out the (stable) pointer.
     unsafe fn take_next_slot(&mut self) -> NonNull<T> {
         // SAFETY: forwards this fn's own contract to the two sources.
         // The final unwrap holds: `grow` always installs a fresh bump
-        // window of `slab_capacity >= 1` virgin slots.
+        // window of `slab_capacity >= 1` never-used slots.
         unsafe {
             self.take_next_free().or_else(|| self.take_bump()).unwrap_or_else(|| {
                 self.grow();
@@ -184,11 +179,11 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     }
 
     /// Pre-pend a slot to the free list.
+    ///
+    /// # Safety
+    /// - `slot` MUST be a slot of this allocator, that has already had
+    ///   its value moved out.
     unsafe fn return_slot(&mut self, mut slot: NonNull<Slot<T>>) {
-        // The link write is unconditional: a slot returned to an EMPTY
-        // list must hold `None`, not its moved-out value's leftover
-        // bytes — `take_next_free` installs whatever sits here as the
-        // new head when this slot is popped.
         // SAFETY: `slot` is a slot of this allocator whose value has
         // already been moved out (deallocate's contract), so the
         // storage is exclusively ours to repurpose as the list link.
@@ -198,6 +193,10 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
 
     /// The layout of one slab allocation — header, then `slab_capacity`
     /// slots — and the byte offset from the slab base to slot 0.
+    ///
+    /// # Panics
+    ///
+    /// If `self.slab_capacity` is so high that [`Layout`] arithmetic overflows.
     const fn slab_layout(&self) -> (core::alloc::Layout, usize) {
         let layout = Layout::new::<SlabHeader<T>>();
 
@@ -212,23 +211,24 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
         }
     }
 
-    /// The size of the array of slabs.
+    /// The size of a slab's slot array in bytes.
     const fn slot_array_size(&self) -> usize {
         self.slab_capacity * core::mem::size_of::<Slot<T>>()
     }
 
     /// Allocate and chain a fresh slab, resetting the bump window to its
-    /// virgin slots. Called by [`allocate`](SlotAllocator::allocate) when both the free list and
-    /// the bump window are empty. Aborts via [`handle_alloc_error`] on
-    /// heap exhaustion (the infallibility half of the trait contract).
+    /// never-used slots. Called by [`allocate`](SlotAllocator::allocate) when
+    /// both the free list and the bump window are empty. Aborts via
+    /// [`handle_alloc_error`] on heap exhaustion.
     fn grow(&mut self) {
         let (layout, slot0) = self.slab_layout();
-        let last_slot = slot0 + self.slot_array_size();
+        let range_end = slot0 + self.slot_array_size();
         // SAFETY: the layout has nonzero size (a header plus at least one
         // slot), and every offset written below stays inside the fresh
         // slab allocation.
         unsafe {
             let new_slab = self.alloc.alloc(layout);
+
             if new_slab.is_null() {
                 handle_alloc_error(layout)
             }
@@ -238,15 +238,11 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
 
             // The pointer is to `u8` so these adds are byte offsets.
             let first_slot = new_slab.cast::<u8>().add(slot0).cast();
-            let last_slot = new_slab.cast::<u8>().add(last_slot).cast();
+            let range_end = new_slab.cast::<u8>().add(range_end).cast();
 
-            self.bump_next = Some(first_slot);
-            self.bump_end = Some(last_slot);
+            self.bump_range = first_slot..range_end;
 
-            // Chain the new slab at the head of the teardown list. The
-            // link write is unconditional: the very first slab must both
-            // initialize its header's `next` (to `None`, the empty list)
-            // and become the chain head, or teardown never sees it.
+            // Push the new slab to the start of the slabs list.
             new_slab.as_mut().next = self.slabs;
             self.slabs = Some(new_slab);
         }
@@ -260,8 +256,7 @@ impl<T, A: GlobalAlloc> SlotAllocator<T> for SlabAlloc<T, A> {
     const OWNS_ALL: bool = true;
 
     fn allocate(&mut self, value: T) -> NonNull<T> {
-        // SAFETY: nothing else mutates the slab state (`&mut self` receivers,
-        // `!Sync`); the slot handed back is vacant, exclusively ours, and
+        // SAFETY: The slot handed back is vacant, exclusively ours, and
         // at a stable address — writing `value` initializes it before the
         // pointer escapes.
         unsafe {
@@ -272,9 +267,7 @@ impl<T, A: GlobalAlloc> SlotAllocator<T> for SlabAlloc<T, A> {
     }
 
     unsafe fn deallocate(&mut self, ptr: NonNull<T>) -> T {
-        // Read the value out, then overwrite the slot with the current
-        // free-list head and make the slot the new head. Pointer-only:
-        // the slot's own storage is the list node.
+        // Read the value out, then push the ptr to the free list.
         // SAFETY: per the trait contract `ptr` is a live slot of this
         // allocator, retired exactly once — the read moves the value out,
         // and `return_slot` then owns the vacated storage.
@@ -287,11 +280,10 @@ impl<T, A: GlobalAlloc> SlotAllocator<T> for SlabAlloc<T, A> {
 
     unsafe fn clear_all(&mut self) {
         self.free_list = None;
-        self.bump_next = None;
-        self.bump_end = None;
+        self.bump_range = NonNull::dangling()..NonNull::dangling();
 
         unsafe {
-            // deallocate all slabs except the first.
+            // deallocate all slabs except the first (most recent).
             self.iter_slabs()
                 .skip(1)
                 .for_each(|slab| self.alloc.dealloc(slab.as_ptr().cast(), self.slab_layout().0));
@@ -299,16 +291,15 @@ impl<T, A: GlobalAlloc> SlotAllocator<T> for SlabAlloc<T, A> {
             // If there is a first slab, then we set our bump
             self.slabs = self.slabs.map(|mut slab| {
                 let (_, slot0) = self.slab_layout();
-                let last_slot = slot0 + self.slot_array_size();
+                let range_end = slot0 + self.slot_array_size();
 
                 slab.as_mut().next = None;
 
                 // Cast to u8, apply offsets, set bumps.
                 let first_slot = slab.cast::<u8>().add(slot0).cast();
-                let last_slot = slab.cast::<u8>().add(last_slot).cast();
+                let range_end = slab.cast::<u8>().add(range_end).cast();
 
-                self.bump_next = Some(first_slot);
-                self.bump_end = Some(last_slot);
+                self.bump_range = first_slot..range_end;
 
                 slab
             })

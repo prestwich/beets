@@ -236,7 +236,7 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
     ///   seed it directly);
     /// - (debug) if `sep` does not sort strictly after the present keys.
     pub(crate) fn raw_append_child(&mut self, sep: K, child: Node<K, V, M>) {
-        assert!(self.child_count >= 1, "seed child 0 before appending");
+        debug_assert!(self.child_count >= 1, "seed child 0 before appending");
         debug_assert!(self.key_count() == 0 || self.keys_ref().last().unwrap() < &sep);
 
         self.keys[self.key_count()].write(sep);
