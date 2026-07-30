@@ -30,11 +30,15 @@ harness = false
 
 [features]
 default = ["std"]
-std = []
+std = ["alloc"]
+# The heap-backed allocators (`Global`, `Slabs`) and everything that
+# grows: without it the crate is core-only and the fixed-region arena
+# (`FixedNodes`) is the whole allocator story.
+alloc = []
 # Exposes the invariant net and the differential harness (`harness`
 # module) to external test drivers — the fuzz targets under fuzz/.
 # Not a public API: exempt from semver, never enable it in production.
-testutils = ["dep:arbitrary"]
+testutils = ["dep:arbitrary", "std"]
 
 # Line tables for profilers (samply / cargo-flamegraph): lets samples map
 # back to source through the heavy inlining. No runtime cost.

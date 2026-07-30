@@ -23,11 +23,9 @@ use core::{
     ops::{Index, IndexMut},
     ptr::NonNull,
 };
+use core::convert::Infallible;
 
-use crate::{
-    BPlusTree, DEFAULT_MAX_LEVELS, Inner, Key, Leaf, Node,
-    allocator::{NodeAllocator, SlotAllocator},
-};
+use crate::{BPlusTree, DEFAULT_MAX_LEVELS, Inner, Key, Leaf, Node, allocator::NodeAllocator};
 
 /// A [`Leaf`] node that has been constructed but not yet enrolled in any tree.
 ///
@@ -35,26 +33,27 @@ use crate::{
 /// loading: it holds (a shared handle to) the allocator the leaf came
 /// from, so its [`Drop`] can return the slot while the loader goes on
 /// allocating through the same allocator.
-pub(crate) struct Unyielded<'a, K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>>(
+pub(crate) struct Unyielded<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>>(
     NonNull<Leaf<K, V, M>>,
     &'a RefCell<A>,
 );
 
-impl<K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>> Drop
-    for Unyielded<'_, K, V, M, A>
-{
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Drop for Unyielded<'_, K, V, M, A> {
     fn drop(&mut self) {
         // SAFETY: the pending is used only during from_fn iter construction
         // and is known to be totally owned while it exists; its slot came
         // from the held allocator.
-        drop(unsafe { self.1.borrow_mut().deallocate(self.0) })
+        drop(unsafe { self.1.borrow_mut().dealloc_leaf(self.0) })
     }
 }
 
-impl<'a, K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>> Unyielded<'a, K, V, M, A> {
+impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Unyielded<'a, K, V, M, A> {
     /// Create a new [`Unyielded`] by moving a leaf into `alloc`.
     fn leaking_new(leaf: Leaf<K, V, M>, alloc: &'a RefCell<A>) -> Self {
-        Self(alloc.borrow_mut().allocate(leaf), alloc)
+        // SAFETY: sorted-load surface — infallible allocators cannot
+        // exhaust, and the fallible load (`try_from_sorted_iter_in`)
+        // pre-flights before drawing.
+        Self(unsafe { alloc.borrow_mut().alloc_leaf_unchecked(leaf) }, alloc)
     }
 
     /// Convert into a [`Node`]. This is the intended way to pass off ownership
@@ -233,7 +232,13 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
                 // If there is no current `Inner` at this layer, we make a new
                 // `Inner` containing the incoming node as its first child.
                 lvl.current =
-                    Some((key, alloc.borrow_mut().allocate(Inner::from_first_child(node))));
+                    // SAFETY: sorted-load surface — infallible
+                    // allocators cannot exhaust, and the fallible load
+                    // (`try_from_sorted_iter_in`) pre-flights before
+                    // drawing.
+                    Some((key, unsafe {
+                        alloc.borrow_mut().alloc_inner_unchecked(Inner::from_first_child(node))
+                    }));
                 // Occupying level `H - 1` would stand the finished tree at `H
                 // + 1` levels. This would
                 assert!(
@@ -398,14 +403,26 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     /// incorrect tree that misroutes lookups.
     pub fn from_sorted_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self
     where
-        A: Default,
+        A: Default + NodeAllocator<K, V, M, Exhaustion = Infallible>,
     {
         Self::from_sorted_iter_in(iter, A::default())
     }
 
-    /// As [`Self::from_sorted_iter`], but allocating nodes from
-    /// `allocator` for the tree's whole life.
-    pub fn from_sorted_iter_in<I: IntoIterator<Item = (K, V)>>(iter: I, allocator: A) -> Self {
+    /// As [`Self::from_sorted_iter_in`], but reporting allocator
+    /// exhaustion instead of panicking. On `Err`, every node built so
+    /// far has been torn down through the loader's guard machinery,
+    /// every pair already drawn from `iter` has been dropped (a
+    /// streaming load cannot hand them back), and the emptied allocator
+    /// comes back to the caller.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::from_sorted_iter_in`]: the `H`-level cap still panics
+    /// — that is a structural refusal, not an allocation failure.
+    pub fn try_from_sorted_iter_in<I: IntoIterator<Item = (K, V)>>(
+        iter: I,
+        allocator: A,
+    ) -> Result<Self, A> {
         // Level 0: chunk the pairs into the linked leaf chain. Sibling
         // links and the leaf-level tail repair live in the adapter;
         // `len` is tallied leaf by leaf as they stream out. The loader
@@ -436,7 +453,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         // If there is no first leaf, then return an empty tree
         let Some((first_key, first_leaf)) = leaves.next() else {
             drop(leaves);
-            return Self::new_in(allocator.into_inner());
+            return Self::try_new_in(allocator.into_inner());
         };
 
         // If there's no second leaf, return the first leaf as the root node.
@@ -447,7 +464,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
             // SAFETY: a lone leaf roots a height-0 tree, `len` is the
             // tally of every drained pair, and the leaf came from
             // `allocator`.
-            return unsafe { Self::from_parts(root, 0, len, allocator.into_inner()) };
+            return unsafe { Ok(Self::from_parts(root, 0, len, allocator.into_inner())) };
         };
 
         // Stream every leaf into the treepath's level 0;
@@ -463,7 +480,21 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         let (root, height, len) = tree.build();
         // SAFETY: `build` returns exactly `from_parts`'s contract (see its
         // return sites), and every node was allocated from `allocator`.
-        unsafe { Self::from_parts(root, height, len, allocator.into_inner()) }
+        unsafe { Ok(Self::from_parts(root, height, len, allocator.into_inner())) }
+    }
+
+    /// As [`Self::from_sorted_iter`], but allocating nodes from
+    /// `allocator` for the tree's whole life.
+    // TODO(scaffold): becomes the thin panicking wrapper over
+    // `try_from_sorted_iter_in` once that lands.
+    pub fn from_sorted_iter_in<I: IntoIterator<Item = (K, V)>>(iter: I, allocator: A) -> Self
+    where
+        A: NodeAllocator<K, V, M, Exhaustion = Infallible>,
+    {
+        match Self::try_from_sorted_iter_in(iter, allocator) {
+            Ok(tree) => tree,
+            Err(_) => unreachable!(),
+        }
     }
 }
 
@@ -489,7 +520,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     ) -> impl Iterator<Item = Unyielded<'a, K, V, M, A>> + use<'a, I, K, V, M, A>
     where
         I: Iterator<Item = (K, V)>,
-        A: SlotAllocator<Leaf<K, V, M>>,
+        A: NodeAllocator<K, V, M>,
     {
         // One leaf of delay: a leaf is yielded only once its successor
         // exists (or the source is exhausted), so its `next` is already

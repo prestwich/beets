@@ -62,7 +62,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     /// Test-only — production insertion is descend/commit (the tree
     /// searches once and hands the slot to [`Self::insert_at`]): the leaf
     /// tests pin the self-contained contract through it.
-    pub(crate) fn insert<A: SlotAllocator<Self>>(
+    pub(crate) fn insert<A: NodeAllocator<K, V, M, Exhaustion = core::convert::Infallible>>(
         &mut self,
         key: K,
         val: V,

@@ -1,8 +1,9 @@
 use core::mem::MaybeUninit;
+use core::convert::Infallible;
 
 use crate::{
-    Key, Slabs,
-    allocator::{Global, NodeAllocator, SlotAllocator},
+    Key,
+    allocator::{DefaultAllocator, NodeAllocator},
 };
 
 mod bulk;
@@ -21,6 +22,8 @@ mod node;
 pub(crate) use node::Node;
 #[cfg(debug_assertions)]
 pub(crate) use node::NodeKind;
+
+use crate::allocator::Reservation;
 
 // TODO:
 // - perf: last-touched-leaf cache for point reads (cf. sweep_bptree's
@@ -118,7 +121,7 @@ pub struct BPlusTree<
     K: Key,
     V,
     const M: usize,
-    A: NodeAllocator<K, V, M> = Slabs<K, V, M, Global>,
+    A: NodeAllocator<K, V, M> = DefaultAllocator<K, V, M>,
     const H: usize = { crate::DEFAULT_MAX_LEVELS },
 > {
     // The handle IS the pointer; boxing it would be double indirection.
@@ -152,9 +155,9 @@ where
 // SAFETY: sharing `&BPlusTree` shares a read-only tree. Every `&self`
 // method is a pure read of the node graph — descents, gets, iteration;
 // none mutates node memory through the `NonNull`s — and no `&self`
-// path can reach the allocator: [`SlotAllocator`]'s receivers are
-// `&mut self`, unreachable through a shared borrow, and nothing hands
-// out `&A`. The tree itself has no interior mutability, so while
+// path can MUTATE the allocator: [`NodeAllocator`]'s slot-traffic
+// receivers are `&mut self`, unreachable through a shared borrow (its
+// `&self` capacity queries are pure reads of plain fields). The tree itself has no interior mutability, so while
 // shared borrows exist, no thread can write anything a reader
 // dereferences. What readers DO reach — `&K`s and `&V`s — is what the
 // `Sync` bounds sign for (`A: Sync` is defensive; no `&self` path
@@ -212,7 +215,13 @@ impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Drop
     // value not yet reached. Because this is itself `Drop` glue, such a panic
     // during an already-unwinding drop double-panics and aborts.
     fn drop(&mut self) {
-        if const { Self::CAN_SKIP_DROP } {
+        // Wholesale out: when values carry no drop glue (`K: Copy`
+        // always; `V` checked here) and the allocator can forget every
+        // slot at once, the walk is pure busywork — the allocator field
+        // dropping right after us returns the memory.
+        // SAFETY: the tree is mid-drop — no node pointer is read after
+        // this, and the forgotten values were just checked drop-free.
+        if !core::mem::needs_drop::<V>() && unsafe { self.allocator.reclaim_all() } {
             return;
         }
 
@@ -239,28 +248,43 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     /// A heuristic max height.
     pub const MAX_HEIGHT: usize = crate::max_height(M);
 
-    pub const CAN_SKIP_DROP: bool = !core::mem::needs_drop::<V>()
-        && <A as SlotAllocator<Leaf<K, V, M>>>::OWNS_ALL
-        && <A as SlotAllocator<Inner<K, V, M>>>::OWNS_ALL;
-
     const __LEVEL_CAP: () =
         assert!(H >= 1 && H <= usize::BITS as usize, "the level cap H must be in 1..=usize::BITS");
 
     /// Creates a tree whose root is a single empty leaf.
     pub fn new() -> Self
     where
-        A: Default,
+        A: Default + NodeAllocator<K, V, M, Exhaustion = Infallible>,
     {
         Self::new_in(A::default())
     }
 
+    /// As [`Self::new_in`], but reporting allocator exhaustion instead
+    /// of panicking: the root leaf is the one allocation construction
+    /// needs, and on `Err` the untouched allocator comes back — which
+    /// matters for [`FixedNodes`](crate::FixedNodes), where losing the
+    /// arena forfeits its borrowed storage.
+    ///
+    /// (A FRESH fixed arena cannot actually fail here — its storage
+    /// const-asserts `LEAVES >= 1` — but generic callers wanting a
+    /// no-panic guarantee get the honest signature.)
+    pub fn try_new_in(mut allocator: A) -> Result<Self, A> {
+        const { Self::__LEVEL_CAP };
+        let Ok(leaf) = allocator.try_alloc_leaf(Leaf::new(None)) else { return Err(allocator) };
+
+        Ok(Self { root: Node::from_leaf_ptr(leaf), height: 0, len: 0, allocator })
+    }
+
     /// As [`Self::new`], but allocating nodes from `allocator` for the
     /// tree's whole life.
-    pub fn new_in(mut allocator: A) -> Self {
-        const { Self::__LEVEL_CAP };
-
-        let root = Node::from_leaf_ptr(allocator.allocate(Leaf::new(None)));
-        Self { root, height: 0, len: 0, allocator }
+    pub fn new_in(allocator: A) -> Self
+    where
+        A: NodeAllocator<K, V, M, Exhaustion = Infallible>,
+    {
+        match Self::try_new_in(allocator) {
+            Ok(tree) => tree,
+            Err(_) => unreachable!("leaf allocator exhausted"),
+        }
     }
 
     /// The number of key/value pairs in the tree.
@@ -314,24 +338,85 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     pub fn contains_key(&self, key: &K) -> bool {
         self.get(key).is_some()
     }
-
-    /// Insert a key-value pair, returning the previous value if the key was
-    /// already present.
-    pub fn insert(&mut self, key: K, val: V) -> Option<V> {
+    /// Insert a key-value pair, returning the previous value if the key
+    /// was already present — unless allocating for it would exhaust the
+    /// allocator, in which case the pair comes back in `Err` and the
+    /// tree is EXACTLY as it was: same pairs, same structure, same
+    /// allocator occupancy.
+    ///
+    /// Atomicity is reserve-then-commit. The descent is recorded as in
+    /// [`insert`](Self::insert); the commit's exact allocation bill is
+    /// computed from occupancies the descent already holds (a full leaf
+    /// splits; each consecutive full inner above it splits; all-full-to-
+    /// the-root grows the tree by one inner); every billed slot is
+    /// reserved UNINITIALIZED via the allocator's fallible primitives;
+    /// only then does the commit mutate, drawing slots from the
+    /// reservation — which cannot fail. A failed reservation returns
+    /// every already-reserved slot untouched-uninitialized and hands the
+    /// pair back.
+    ///
+    /// With an infallible allocator (`Slabs`, `Global`) the reservation
+    /// cannot fail, the `Err` arm is unreachable, and this compiles to
+    /// [`insert`](Self::insert).
+    pub fn try_insert(&mut self, key: K, val: V) -> Result<Option<V>, (K, V)> {
         let mut slot = MaybeUninit::uninit();
         let descent = self.descend_into(&key, &mut slot);
 
         if descent.exact {
             // SAFETY:
             //
-            // `descent.exact`` is set
-            return Some(unsafe { descent.commit_replace(val) });
+            // `descent.exact` is set
+            return Ok(Some(unsafe { descent.commit_replace(val) }));
+        }
+
+        let inners = descent.count_inner_splits();
+        let leaves = (inners != 0) as usize;
+
+        // Reserve the whole bill up front — uninit slots in hand, not a
+        // promise — so the commit below cannot fail and a failure here
+        // rolls back to an untouched tree. (Reserving mutates only the
+        // allocator; node addresses are stable by its contract, so the
+        // descent stays valid.)
+        let mut reservation = Reservation::new();
+        for _ in 0..leaves {
+            if reservation.reserve_leaf(&mut self.allocator).is_err() {
+                reservation.release(&mut self.allocator);
+                return Err((key, val));
+            }
+        }
+        for _ in 0..inners {
+            if reservation.reserve_inner(&mut self.allocator).is_err() {
+                reservation.release(&mut self.allocator);
+                return Err((key, val));
+            }
         }
 
         // SAFETY: the descent is fresh from `descend` under this borrow,
-        // the tree untouched since, and `exact` is false.
-        unsafe { descent.commit_insert(key, val) };
-        None
+        // the tree untouched since (only the allocator was), `exact` is
+        // false, and the reservation holds the commit's full bill.
+        unsafe { descent.commit_insert(key, val, &mut reservation) };
+
+        debug_assert!(
+            reservation.is_empty(),
+            "the bill must be exact: a leftover slot means the descent over-billed \
+             (the wrapper already asserts the under-billed direction)"
+        );
+        Ok(None)
+    }
+
+    /// Insert a key-value pair, returning the previous value if the key was
+    /// already present.
+    // TODO(scaffold): becomes the thin panicking wrapper over
+    // `try_insert` once that lands (one code path; infallible
+    // allocators fold back to exactly this body).
+    pub fn insert(&mut self, key: K, val: V) -> Option<V>
+    where
+        A: NodeAllocator<K, V, M, Exhaustion = Infallible>,
+    {
+        match self.try_insert(key, val) {
+            Ok(val) => val,
+            Err(_) => unreachable!("failed to allocate"),
+        }
     }
 
     /// Remove `key`, returning its value if it was present.
@@ -377,16 +462,16 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
 
     /// Drop every pair, resetting to the empty tree.
     pub fn clear(&mut self) {
-        if const { Self::CAN_SKIP_DROP } {
-            // SAFETY:
-            // A::OWNS_ALL is checked by CAN_SKIP_DROP
-            // We immediately invalidate the tree by overwriting the root
-            // We kinow that V has no drop glue (checked by CAN_SKIP_DROP
-            unsafe {
-                SlotAllocator::<Leaf<K, V, M>>::clear_all(&mut self.allocator);
-                SlotAllocator::<Inner<K, V, M>>::clear_all(&mut self.allocator);
-            }
-        } else {
+        // Wholesale reset when values carry no drop glue (`K: Copy`
+        // always; `V` checked here) and the allocator can forget every
+        // slot at once; the per-node walk otherwise.
+        // SAFETY (reclaim_all): every node pointer it invalidates is
+        // dead — the root is overwritten immediately below, before
+        // anything can read it — and the forgotten values were just
+        // checked drop-free.
+        let reclaimed = !core::mem::needs_drop::<V>() && unsafe { self.allocator.reclaim_all() };
+
+        if !reclaimed {
             // SAFETY:
             // - `height` is the impl-block invariant — exactly the
             // height of `root`'s subtree. `root` is overwritten with a fresh
@@ -397,7 +482,10 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
             }
         }
 
-        self.root = Node::from_leaf_ptr(self.allocator.allocate(Leaf::new(None)));
+        // SAFETY: the tree just released every slot it held — and it
+        // held at least the root leaf — so one leaf slot is servable.
+        self.root =
+            Node::from_leaf_ptr(unsafe { self.allocator.alloc_leaf_unchecked(Leaf::new(None)) });
         self.height = 0;
         self.len = 0;
     }
@@ -477,27 +565,32 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default, const H: usize> Default
-    for BPlusTree<K, V, M, A, H>
+impl<K, V, const M: usize, A, const H: usize> Default for BPlusTree<K, V, M, A, H>
+where
+    K: Key + Ord,
+    A: NodeAllocator<K, V, M, Exhaustion = Infallible> + Default,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> core::fmt::Debug
-    for BPlusTree<K, V, M, A, H>
+impl<K, V, const M: usize, A, const H: usize> core::fmt::Debug for BPlusTree<K, V, M, A, H>
 where
     K: Key + core::fmt::Debug,
     V: core::fmt::Debug,
+    A: NodeAllocator<K, V, M>,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default, const H: usize>
-    FromIterator<(K, V)> for BPlusTree<K, V, M, A, H>
+#[cfg(feature = "alloc")]
+impl<K, V, const M: usize, A, const H: usize> FromIterator<(K, V)> for BPlusTree<K, V, M, A, H>
+where
+    K: Key + Ord,
+    A: NodeAllocator<K, V, M, Exhaustion = Infallible> + Default,
 {
     /// Builds through the bulk loader, not an insert loop: collect, sort,
     /// dedup, then [`BPlusTree::from_sorted_iter`]. The loaded tree is
@@ -526,8 +619,11 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default, const
     }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Extend<(K, V)>
-    for BPlusTree<K, V, M, A, H>
+impl<K, V, const M: usize, A, const H: usize> Extend<(K, V)> for BPlusTree<K, V, M, A, H>
+where
+    A: NodeAllocator<K, V, M, Exhaustion = Infallible>,
+    K: Key + Ord,
+    A: NodeAllocator<K, V, M>,
 {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (key, val) in iter {

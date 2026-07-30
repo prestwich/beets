@@ -45,10 +45,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 mod allocator;
-pub use allocator::{Global, NodeAllocator, Slabs, SlotAllocator};
+pub use allocator::{AllocError, DefaultAllocator, FixedNodes, NodeAllocator, NodeStorage};
+
+#[cfg(feature = "alloc")]
+pub use allocator::{Global, Slabs};
 
 mod key;
 pub use key::Key;
@@ -59,6 +63,12 @@ pub(crate) use tree::{Inner, Leaf, Node};
 
 #[cfg(debug_assertions)]
 pub(crate) use tree::NodeKind;
+
+// The suite exercises every allocator (heap-backed ones included) and
+// leans on `std` fixtures throughout; a core-only test build is a
+// non-goal, refused explicitly rather than half-compiled.
+#[cfg(all(test, not(feature = "std")))]
+compile_error!("beets' test suite requires the `std` feature; run `cargo test` with default features");
 
 /// Test utils. Primarily a harness, and methods for asserting invariants about
 /// tree structure.
@@ -136,3 +146,7 @@ mod global_alloc_allocators;
 #[cfg(test)]
 #[path = "tests/wholesale_reclaim.rs"]
 mod wholesale_reclaim;
+
+#[cfg(test)]
+#[path = "tests/try_surface.rs"]
+mod try_surface;

@@ -17,7 +17,7 @@ use crate::{
 
 impl<T> SlabAlloc<T> {
     /// An empty allocator that will grow in slabs of `slab_capacity`
-    /// slots. Allocates nothing until the first [`allocate`](SlotAllocator::allocate).
+    /// slots. Allocates nothing until the first [`allocate`](SlabAlloc::allocate).
     ///
     /// Capacity guidance: size slabs to a byte budget (a few pages,
     /// e.g. 64 KiB) rather than a slot count — [`Slabs`] does
@@ -50,6 +50,34 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     /// sites, not for correctness.
     pub(crate) fn contains(&self, ptr: NonNull<T>) -> bool {
         self.iter_slabs().any(|slab| self.slab_contains(slab, ptr))
+    }
+
+    /// Test-only value-level allocate — the unit pins' original surface,
+    /// rebuilt over the pool's slot primitive so they keep their shape.
+    pub(crate) fn allocate(&mut self, value: T) -> NonNull<T> {
+        let slot = self.take_next_slot();
+        // SAFETY: a fresh slot is exclusively ours; the write
+        // initializes it before the pointer escapes.
+        unsafe { slot.write(value) };
+        slot
+    }
+
+    /// Test-only value-level deallocate, the inverse of
+    /// [`allocate`](Self::allocate).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a live slot of this pool holding an initialized
+    /// value, retired exactly once; no other pointer to it may be used
+    /// after this call.
+    pub(crate) unsafe fn deallocate(&mut self, ptr: NonNull<T>) -> T {
+        // SAFETY: per this method's contract — the read moves the value
+        // out, and `return_slot` then owns the vacated storage.
+        unsafe {
+            let val = ptr.read();
+            self.return_slot(ptr.cast());
+            val
+        }
     }
 }
 
@@ -304,6 +332,55 @@ fn contains_accepts_live_pointers_and_rejects_foreign_ones() {
     }
 }
 
+// ── the arena's NodeAllocator surface ───────────────────────────────
+
+/// The arena's ceiling is the heap's — no bound to declare. What is ON
+/// HAND is exact: nothing at birth, the rest of a slab after its first
+/// allocation, one more slot after each retirement — per pool,
+/// independently.
+#[test]
+fn capacity_is_unbounded_and_available_tracks_the_pools() {
+    use crate::NodeAllocator;
+
+    let mut arena: Slabs<u64, u64, M> = Slabs::new();
+    assert_eq!(arena.leaf_capacity(), None, "slab growth is heap-bounded only");
+    assert_eq!(arena.inner_capacity(), None);
+    assert_eq!(arena.leaf_available(), 0, "a fresh arena has acquired nothing to serve");
+    assert_eq!(arena.inner_available(), 0);
+
+    let slot = arena.try_alloc_leaf_uninit().unwrap();
+    let after_first = arena.leaf_available();
+    assert!(after_first > 0, "acquiring a slab leaves the rest of it on hand");
+    assert_eq!(arena.inner_available(), 0, "the inner pool acquired nothing");
+
+    // SAFETY: never initialized; retired exactly once.
+    unsafe { arena.dealloc_leaf_uninit(slot) };
+    assert_eq!(arena.leaf_available(), after_first + 1, "a retired slot is on hand again");
+}
+
+/// The uninit primitives are the pool's slot service: reserve slots,
+/// return one never-written (the reservation-rollback path), initialize
+/// the other by hand and retire it through the value method.
+#[test]
+fn uninit_slots_round_trip_through_the_arena() {
+    use crate::NodeAllocator;
+
+    let mut arena: Slabs<u64, u64, M> = Slabs::new();
+    let a = arena.try_alloc_leaf_uninit().unwrap();
+    let b = arena.try_alloc_leaf_uninit().unwrap();
+    assert_ne!(a, b, "live slots are distinct");
+
+    // SAFETY: never initialized; retired exactly once.
+    unsafe { arena.dealloc_leaf_uninit(a) };
+
+    let leaf_ptr = b.cast::<Leaf<u64, u64, M>>();
+    // SAFETY: a fresh slot is exclusively ours; the write initializes it.
+    unsafe { leaf_ptr.write(Leaf::new(None)) };
+    // SAFETY: initialized just above; retired exactly once.
+    let leaf = unsafe { arena.dealloc_leaf(leaf_ptr) };
+    assert_eq!(leaf.len(), 0, "the value that comes back is the value written in");
+}
+
 // ── the arena, end to end ───────────────────────────────────────────
 
 /// An arena-backed tree supports the full mutation cycle — insert,
@@ -387,9 +464,9 @@ fn clear_all_resets_a_grown_pool_for_reuse() {
         alloc.allocate(v(k));
     }
 
-    // SAFETY: `SlabAlloc` declares `OWNS_ALL`; every outstanding
-    // pointer is abandoned here, and forgetting `u64`s has no
-    // observable effect.
+    // SAFETY: the pool owns its slot memory wholesale; every
+    // outstanding pointer is abandoned here, and forgetting `u64`s has
+    // no observable effect.
     unsafe { alloc.clear_all() };
 
     let p = alloc.allocate(0xBEE7);

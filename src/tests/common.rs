@@ -24,8 +24,12 @@ pub fn v(k: u64) -> u64 {
     k * 2
 }
 
-/// Insert `0..n` with [`v`]-mapped values.
-pub fn fill<A: NodeAllocator<u64, u64, M>>(tree: &mut BPlusTree<u64, u64, M, A>, n: u64) {
+/// Insert `0..n` with [`v`]-mapped values. (Infallible only: `insert`
+/// is type-gated to allocators that cannot exhaust.)
+pub fn fill<A: NodeAllocator<u64, u64, M, Exhaustion = core::convert::Infallible>>(
+    tree: &mut BPlusTree<u64, u64, M, A>,
+    n: u64,
+) {
     for k in 0..n {
         tree.insert(k, v(k));
     }

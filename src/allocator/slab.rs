@@ -1,4 +1,4 @@
-//! The slab arena: [`SlotAllocator`] backed by chunked, stable-address slabs.
+//! The slab arena: [`NodeAllocator`] backed by chunked, stable-address slabs.
 //!
 //! # Design
 //!
@@ -32,9 +32,9 @@
 //! - A slot is in exactly one state: LIVE (holds a `T` the caller owns),
 //!   FREE (holds a `next_free` link, on the free list), or NEVER-USED (in
 //!   the newest slab's untouched tail, no bytes initialized). State
-//!   changes only at [`allocate`](SlotAllocator::allocate)
+//!   changes only at [`allocate`](SlabAlloc::allocate)
 //!   (free/never-used → live) and
-//!   [`deallocate`](SlotAllocator::deallocate) (live → free).
+//!   [`deallocate`](SlabAlloc::deallocate) (live → free).
 //! - Drop frees slab memory only. It must not read slots: any still-live
 //!   `T` is the caller's teardown bug (the tree drops values via
 //!   [`drop_subtree`](crate::Node::drop_subtree) before its allocator
@@ -53,10 +53,11 @@ use core::{
     num::NonZeroUsize,
     ptr::NonNull,
 };
+use core::convert::Infallible;
 
 use crate::{
     Global, Inner, Key, Leaf,
-    allocator::{Slot, SlotAllocator},
+    allocator::{NodeAllocator, Slot},
 };
 
 /// A slab's header. The `slab_capacity` slots trail it in the SAME
@@ -73,7 +74,7 @@ pub(crate) struct SlabHeader<T> {
 }
 
 /// A stable-address slab allocator for `T`-slots. See the module docs
-/// for the design; see [`SlotAllocator`] for the contract it implements.
+/// for the design; see [`NodeAllocator`] for the contract [`Slabs`] implements over it.
 pub(crate) struct SlabAlloc<T, A: GlobalAlloc = Global> {
     /// Head of the slab chain (newest first).
     slabs: Option<NonNull<SlabHeader<T>>>,
@@ -88,6 +89,9 @@ pub(crate) struct SlabAlloc<T, A: GlobalAlloc = Global> {
     /// Slots per slab, fixed at construction.
     slab_capacity: NonZeroUsize,
 
+    /// Count of currently available slots.
+    availability: usize,
+
     /// Allocator, used to allocate new slabs..
     // DO NOT REORDER THIS FIELD.
     alloc: A,
@@ -96,7 +100,7 @@ pub(crate) struct SlabAlloc<T, A: GlobalAlloc = Global> {
 impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     /// An empty allocator that will grow in slabs of `slab_capacity`
     /// slots. Allocates nothing until the first
-    /// [`allocate`](SlotAllocator::allocate).
+    /// [`allocate`](SlabAlloc::allocate).
     ///
     /// Capacity guidance: size slabs to a byte budget (a few pages,
     /// e.g. 64 KiB) rather than a slot count — [`Slabs`] below does
@@ -107,6 +111,7 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
             free_list: None,
             bump_range: NonNull::dangling()..NonNull::dangling(),
             slab_capacity,
+            availability: 0,
             alloc,
         }
     }
@@ -120,11 +125,7 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
 
     /// Get a free slot. Caller is responsible for ensuring the slot does not
     /// get leaked.
-    ///
-    /// SAFETY:
-    ///
-    /// Caller must ensure that they are allowed to mutate the slab state.
-    unsafe fn take_next_free(&mut self) -> Option<NonNull<T>> {
+    fn take_next_free(&mut self) -> Option<NonNull<T>> {
         let next = self.free_list?;
 
         // SAFETY:
@@ -132,12 +133,13 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
         // contains data.
         self.free_list = unsafe { next.as_ref().next_free };
 
+        self.availability -= 1;
         Some(next.cast())
     }
 
     /// Get a free bump slot. Caller is responsible for ensuring the slot does
     /// not get leaked.
-    unsafe fn take_bump(&mut self) -> Option<NonNull<T>> {
+    fn take_bump(&mut self) -> Option<NonNull<T>> {
         if self.bump_range.is_empty() {
             return None;
         };
@@ -156,22 +158,20 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
             // Slab allocation
             self.bump_range.start = unsafe { available.add(1) };
         }
+        self.availability -= 1;
         Some(available.cast())
     }
 
     /// Pop the free list; else take the next never-used slot; else
     /// [`grow()`](Self::grow) and take. Write `value` into the slot and hand
     /// out the (stable) pointer.
-    unsafe fn take_next_slot(&mut self) -> NonNull<T> {
-        // SAFETY: forwards this fn's own contract to the two sources.
-        // The final unwrap holds: `grow` always installs a fresh bump
-        // window of `slab_capacity >= 1` never-used slots.
-        unsafe {
-            self.take_next_free().or_else(|| self.take_bump()).unwrap_or_else(|| {
-                self.grow();
-                self.take_bump().unwrap()
-            })
-        }
+    fn take_next_slot(&mut self) -> NonNull<T> {
+        // NB: The final unwrap holds: `grow` always installs a fresh bump
+        // window of `slab_capacity >= 1` never-used slots, or diverges.
+        self.take_next_free().or_else(|| self.take_bump()).unwrap_or_else(|| {
+            self.grow();
+            self.take_bump().unwrap()
+        })
     }
 
     /// Pre-pend a slot to the free list.
@@ -185,6 +185,7 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
         // storage is exclusively ours to repurpose as the list link.
         unsafe { slot.as_mut() }.next_free = self.free_list;
         self.free_list = Some(slot);
+        self.availability += 1;
     }
 
     /// The layout of one slab allocation — header, then `slab_capacity`
@@ -213,7 +214,7 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
     }
 
     /// Allocate and chain a fresh slab, resetting the bump window to its
-    /// never-used slots. Called by [`allocate`](SlotAllocator::allocate) when
+    /// never-used slots. Called by [`allocate`](SlabAlloc::allocate) when
     /// both the free list and the bump window are empty. Aborts via
     /// [`handle_alloc_error`] on heap exhaustion.
     fn grow(&mut self) {
@@ -241,40 +242,30 @@ impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
             // Push the new slab to the start of the slabs list.
             new_slab.as_mut().next = self.slabs;
             self.slabs = Some(new_slab);
+            self.availability += self.slab_capacity.get();
         }
     }
 }
 
-impl<T, A: GlobalAlloc> SlotAllocator<T> for SlabAlloc<T, A> {
-    /// The pool draws slot memory in whole slabs and returns it in
-    /// whole slabs: its `Drop` (and `clear_all`) reclaim everything
-    /// without per-slot retirement.
-    const OWNS_ALL: bool = true;
+/// The pool's slot traffic, kept as inherent methods: the pool is a
+/// per-`T` building block, and the public [`NodeAllocator`] surface
+/// (one leaf pool + one inner pool) lives on [`Slabs`].
+///
+/// The pool draws slot memory in whole slabs and returns it in whole
+/// slabs: its `Drop` (and [`clear_all`](Self::clear_all)) reclaim
+/// everything without per-slot retirement.
 
-    fn allocate(&mut self, value: T) -> NonNull<T> {
-        // SAFETY: The slot handed back is vacant, exclusively ours, and
-        // at a stable address — writing `value` initializes it before the
-        // pointer escapes.
-        unsafe {
-            let slot = self.take_next_slot();
-            slot.write(value);
-            slot
-        }
-    }
-
-    unsafe fn deallocate(&mut self, ptr: NonNull<T>) -> T {
-        // Read the value out, then push the ptr to the free list.
-        // SAFETY: per the trait contract `ptr` is a live slot of this
-        // allocator, retired exactly once — the read moves the value out,
-        // and `return_slot` then owns the vacated storage.
-        unsafe {
-            let val = ptr.read();
-            self.return_slot(ptr.cast());
-            val
-        }
-    }
-
-    unsafe fn clear_all(&mut self) {
+impl<T, A: GlobalAlloc> SlabAlloc<T, A> {
+    /// Forget every outstanding slot at once, keeping only the newest
+    /// slab (its slots all never-used again) — the pool-level engine of
+    /// [`NodeAllocator::reclaim_all`].
+    ///
+    /// # Safety
+    ///
+    /// Every pointer previously handed out by this pool is invalidated;
+    /// still-resident values are forgotten, never read or dropped (the
+    /// caller must have dropped them or know forgetting is benign).
+    pub(crate) unsafe fn clear_all(&mut self) {
         self.free_list = None;
         self.bump_range = NonNull::dangling()..NonNull::dangling();
 
@@ -326,6 +317,7 @@ impl<T, A: GlobalAlloc> Drop for SlabAlloc<T, A> {
 /// independently (both from a shared per-slab byte budget).
 pub struct Slabs<K: Key, V, const M: usize, A: GlobalAlloc = Global> {
     leaves: SlabAlloc<Leaf<K, V, M>, A>,
+
     inners: SlabAlloc<Inner<K, V, M>, A>,
 }
 
@@ -337,7 +329,7 @@ pub struct Slabs<K: Key, V, const M: usize, A: GlobalAlloc = Global> {
 // (payloads of `K`s and `V`s, plus intra-arena node pointers) and
 // backing memory obtained from `A` — which is what the three `Send`
 // bounds sign for. Outstanding slot pointers a caller still holds are
-// already governed by [`SlotAllocator`]'s contract (the slot is
+// already governed by [`NodeAllocator`]'s contract (the slot is
 // exclusively that caller's, and every use is `unsafe`): keeping them
 // coherent with a moved arena is that caller's obligation, discharged
 // for the tree by `BPlusTree` moving arena and node graph as one
@@ -413,43 +405,70 @@ impl<K: Key, V, const M: usize, A: GlobalAlloc> Slabs<K, V, M, A> {
     }
 }
 
-impl<K: Key, V, const M: usize, A: GlobalAlloc> SlotAllocator<Leaf<K, V, M>> for Slabs<K, V, M, A> {
-    // Slab allocators own their slots wholesale
-    const OWNS_ALL: bool = true;
+// NB: the provided value-level methods (`try_alloc_leaf`, `dealloc_leaf`,
+// …) could also be overridden here to forward straight to the pools'
+// `allocate`/`deallocate` — worth considering if the uninit-primitive
+// route ever shows up in a profile.
+impl<K: Key, V, const M: usize, A: GlobalAlloc> NodeAllocator<K, V, M> for Slabs<K, V, M, A> {
+    /// Slab growth aborts on heap exhaustion ([`grow`](SlabAlloc::grow)'s
+    /// [`handle_alloc_error`]), so allocation never REPORTS failure and
+    /// the tree's fallible plumbing melts away at monomorphization.
+    type Exhaustion = Infallible;
 
-    fn allocate(&mut self, value: Leaf<K, V, M>) -> NonNull<Leaf<K, V, M>> {
-        self.leaves.allocate(value)
+    fn try_alloc_leaf_uninit(
+        &mut self,
+    ) -> Result<NonNull<core::mem::MaybeUninit<Leaf<K, V, M>>>, Self::Exhaustion> {
+        Ok(self.leaves.take_next_slot().cast())
     }
 
-    unsafe fn deallocate(&mut self, ptr: NonNull<Leaf<K, V, M>>) -> Leaf<K, V, M> {
-        // SAFETY: forwarded — the caller's obligations are this pool's.
-        unsafe { self.leaves.deallocate(ptr) }
+    fn try_alloc_inner_uninit(
+        &mut self,
+    ) -> Result<NonNull<core::mem::MaybeUninit<Inner<K, V, M>>>, Self::Exhaustion> {
+        Ok(self.inners.take_next_slot().cast())
     }
 
-    unsafe fn clear_all(&mut self) {
-        // SAFETY: forwarded — the caller's obligations are this pool's.
-        unsafe { self.leaves.clear_all() }
-    }
-}
-
-impl<K: Key, V, const M: usize, A: GlobalAlloc> SlotAllocator<Inner<K, V, M>>
-    for Slabs<K, V, M, A>
-{
-    // Slab allocators own their slots wholesale
-    const OWNS_ALL: bool = true;
-
-    fn allocate(&mut self, value: Inner<K, V, M>) -> NonNull<Inner<K, V, M>> {
-        self.inners.allocate(value)
+    unsafe fn dealloc_leaf_uninit(&mut self, ptr: NonNull<core::mem::MaybeUninit<Leaf<K, V, M>>>) {
+        // SAFETY:
+        // as trait contract. caller must ensure this is a valid allocation from
+        // this arena
+        unsafe { self.leaves.return_slot(ptr.cast()) };
     }
 
-    unsafe fn deallocate(&mut self, ptr: NonNull<Inner<K, V, M>>) -> Inner<K, V, M> {
-        // SAFETY: forwarded — the caller's obligations are this pool's.
-        unsafe { self.inners.deallocate(ptr) }
+    unsafe fn dealloc_inner_uninit(
+        &mut self,
+        ptr: NonNull<core::mem::MaybeUninit<Inner<K, V, M>>>,
+    ) {
+        // SAFETY:
+        // as trait contract. caller must ensure this is a valid allocation from
+        // this arena
+        unsafe { self.inners.return_slot(ptr.cast()) };
     }
 
-    unsafe fn clear_all(&mut self) {
-        // SAFETY: forwarded — the caller's obligations are this pool's.
-        unsafe { self.inners.clear_all() }
+    fn leaf_capacity(&self) -> Option<usize> {
+        // Slabs grow without bound; only the heap limits them.
+        None
+    }
+
+    fn inner_capacity(&self) -> Option<usize> {
+        None
+    }
+
+    fn leaf_available(&self) -> usize {
+        self.leaves.availability
+    }
+
+    fn inner_available(&self) -> usize {
+        self.inners.availability
+    }
+
+    unsafe fn reclaim_all(&mut self) -> bool {
+        // SAFETY:
+        // as trait contract. caller must ensure that no pointers are held.
+        unsafe {
+            self.inners.clear_all();
+            self.leaves.clear_all();
+        }
+        true
     }
 }
 

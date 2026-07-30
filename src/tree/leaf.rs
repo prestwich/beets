@@ -1,6 +1,8 @@
 use core::{mem::MaybeUninit, ptr::NonNull};
 
-use crate::{Key, allocator::SlotAllocator};
+use core::convert::Infallible;
+
+use crate::{Key, allocator::NodeAllocator};
 
 #[cfg(debug_assertions)]
 use crate::NodeKind;
@@ -351,7 +353,11 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     //
     // - if self.occupied != M
     // - if partition is > M
-    fn splitting_insert<A: SlotAllocator<Self>>(
+    // The `Exhaustion = Infallible` bound is the reserve-then-commit
+    // dividend: this is only ever reached through `commit_insert`'s
+    // reservation wrapper (or an infallible allocator directly), so
+    // allocation here provably cannot fail — no unsafe, no panic arm.
+    fn splitting_insert<A: NodeAllocator<K, V, M, Exhaustion = Infallible>>(
         &mut self,
         partition: usize,
         key: K,
@@ -415,7 +421,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
         self.debug_assert_sorted();
         right.debug_assert_sorted();
 
-        let right = alloc.allocate(right);
+        let right = alloc.alloc_leaf(right);
         self.next = Some(right);
         right
     }
@@ -573,7 +579,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     ///
     /// In debug builds, if `partition` is not `key`'s insertion point or
     /// `key` is already present.
-    pub(crate) fn insert_at<A: SlotAllocator<Self>>(
+    pub(crate) fn insert_at<A: NodeAllocator<K, V, M, Exhaustion = Infallible>>(
         &mut self,
         partition: usize,
         key: K,

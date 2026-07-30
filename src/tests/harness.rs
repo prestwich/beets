@@ -138,7 +138,10 @@ pub fn run_differential<K: Key + Ord, const N: usize, A>(
     seed: u64,
     ops: &[Op],
 ) where
-    A: NodeAllocator<K, u64, N> + Default,
+    // Infallible only: the harness drives the panicking surface
+    // (`insert`, `from_sorted_iter_in`), which the tree type-gates to
+    // allocators that cannot exhaust.
+    A: NodeAllocator<K, u64, N, Exhaustion = core::convert::Infallible> + Default,
 {
     let mut tree: BPlusTree<K, u64, N, A> =
         BPlusTree::from_sorted_iter_in((0..seed).map(|i| (mk(2 * i), v(2 * i))), A::default());

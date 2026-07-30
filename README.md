@@ -31,7 +31,8 @@ as the `std` structure is a B-tree rather than a B+tree.
 ## Goals:
 
 - No reachable UB (miri should pass cleanly)
-- `no_std` support (with `alloc`)
+- `no_std` support — with `alloc` for the heap-backed allocators, or
+  fully core-only over a fixed memory region
 - I hand write the type system and business logic.
 - Claude assists by writing
   - tests
@@ -57,9 +58,19 @@ stable.
 
 By default, the `BPlusTree` uses a simple arena with slab-allocated space for
 inner nodes and leaves. I used this as a fun way to learn how to write a slab
-allocator. By default. the `BPlusTree` holds a `Slabs` that wraps the global
-allocator. Any `::std::alloc::GlobalAlloc` implementer will work, and custom
-allocators can be written via the `SlotAllocator` trait.
+allocator. By default, the `BPlusTree` holds a `Slabs` that wraps the global
+allocator. Any `::std::alloc::GlobalAlloc` implementer also works directly as
+a node allocator (each node becomes its own heap allocation); custom
+allocators implement the `NodeAllocator` trait.
+
+For allocation-free environments there is `FixedNodes`, an arena over a
+caller-declared `NodeStorage` region (typically a `static`). It is the one
+allocator whose exhaustion is a reportable error rather than an abort, which
+is what the tree's `try_insert` / `try_new_in` / `try_from_sorted_iter_in`
+surface exists for: on failure they hand back exactly what you gave them —
+the key-value pair, or the allocator — and the tree is untouched. Building
+with `--no-default-features` (no `alloc`) leaves the fixed arena as the only
+allocator and the crate fully core-only.
 
 ### Nodes
 

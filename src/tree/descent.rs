@@ -2,7 +2,7 @@ use core::{mem::MaybeUninit, ptr::NonNull};
 
 use crate::{
     DEFAULT_MAX_LEVELS, Inner, Key, Leaf,
-    allocator::{Global, NodeAllocator},
+    allocator::{DefaultAllocator, NodeAllocator, Reservation, Reserved},
 };
 
 use super::{BPlusTree, Node};
@@ -30,7 +30,7 @@ pub(crate) struct Descent<
     K: Key,
     V,
     const M: usize,
-    A: NodeAllocator<K, V, M> = Global,
+    A: NodeAllocator<K, V, M> = DefaultAllocator<K, V, M>,
     const H: usize = DEFAULT_MAX_LEVELS,
 > {
     /// The descended tree, as the raw handle every other pointer here
@@ -62,9 +62,7 @@ pub(crate) struct Descent<
 // scalars (`height`, `len`) via projections disjoint from every
 // recorded pointer's pointee, and the `root` slot only after the
 // path's last use.
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
-    Descent<K, V, M, A, H>
-{
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Descent<K, V, M, A, H> {
     /// Commit a replacement, consuming the descent.
     ///
     /// Safety:
@@ -99,6 +97,10 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     ///   been mutated since.
     /// - `self.exact` is false: `key` is absent, and `self.partition`
     ///   is its insertion point in `self.leaf`.
+    /// - `reservation` holds this descent's full allocation bill,
+    ///   acquired from this tree's allocator (the wrapper asserts the
+    ///   under-provisioned direction; slots from a foreign allocator
+    ///   would be handed to this tree's teardown).
     /// - The commit ends the descent: `self` must not be used again
     ///   after this call.
     // `&mut self`, not `self`, and the path read through it in place —
@@ -107,7 +109,12 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     // destructuring `path` out of it to another). `always` because LLVM
     // declines a plain `#[inline]` hint at this size.
     #[inline(always)]
-    pub(crate) unsafe fn commit_insert(&mut self, key: K, val: V) -> NonNull<V> {
+    pub(crate) unsafe fn commit_insert(
+        &mut self,
+        key: K,
+        val: V,
+        reservation: &mut Reservation<K, V, M>,
+    ) -> NonNull<V> {
         let tree = self.tree.as_ptr();
         let partition = self.partition;
         debug_assert!(!self.exact, "commit_insert requires a vacant descent");
@@ -116,9 +123,16 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         // disjoint from every recorded pointer's pointee, so this exclusive
         // reference aliases none of the node mutations below. It is also
         // the commit's only allocator borrow — every helper that allocates
-        // or frees receives a reborrow of it — so its exclusivity holds
-        // for its whole life.
+        // or frees receives a reborrow of the wrapper over it — so its
+        // exclusivity holds for its whole life.
         let alloc = unsafe { &mut (*tree).allocator };
+
+        // The commit draws every slot from the caller's reservation:
+        // the wrapper's `Exhaustion = Infallible` is what satisfies the
+        // split helpers' bounds — allocation on this path cannot fail,
+        // by type.
+        let mut alloc = Reserved::new(reservation, alloc);
+        let alloc = &mut alloc;
 
         // SAFETY: the descent's leaf is live and exclusively reachable
         // under the borrow the caller vouches for.
@@ -265,9 +279,61 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
 
         pair
     }
+
+    /// Count the necessary inner splits. If no leaf split is needed, this is
+    /// 0. Otherwise it is the count of running non-0 heights that are full —
+    /// plus one more when the run reaches the root, since a split escaping
+    /// the top grows the tree by a fresh inner (the new root,
+    /// [`commit_insert`]'s final allocation).
+    ///
+    /// This is [`commit_insert`]'s exact inner-allocation bill, computable
+    /// before anything mutates. Callable only while the descent is valid
+    /// (see the type's validity rules): fresh from `descend`, tree
+    /// untouched since.
+    ///
+    /// [`commit_insert`]: Self::commit_insert
+    pub(crate) fn count_inner_splits(&self) -> usize {
+        debug_assert!(!self.exact, "the bill is for insertion; a replacement allocates nothing");
+
+        // SAFETY: the descent's leaf is live and readable under the
+        // borrow the descent lives within (the type's validity rules).
+        if unsafe { self.leaf.as_ref() }.len() < M {
+            // The pair fits in the leaf: no split cascade at all.
+            return 0;
+        }
+
+        // SAFETY: a scalar read through the descent's tree handle,
+        // disjoint from every recorded pointer's pointee — as the
+        // commit methods' scalar-access note.
+        let height = unsafe { (*self.tree.as_ptr()).height } as usize;
+
+        // Climb the recorded path exactly as the commit's replay would.
+        let mut count = 0;
+        while count < height {
+            // SAFETY: the descent initialized path slots
+            // `1..=tree.height` with valid nodes, live and readable
+            // under the same borrow; slots `1..` sit above the leaf
+            // level, so the cast is an `Inner` by the depth-type
+            // invariant.
+            let inner = unsafe {
+                let (node, _) = self.path[count + 1].assume_init();
+                node.as_ref().as_inner()
+            };
+
+            if inner.len() < M {
+                // This ancestor absorbs the split: the cascade stops.
+                return count;
+            }
+            count += 1;
+        }
+
+        // The split escaped the top of the path: growing the tree
+        // costs one more inner — the new root.
+        count + 1
+    }
 }
 
-impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     BPlusTree<K, V, M, A, H>
 {
     /// Descend from the root to the leaf, determining the path by appling `f`

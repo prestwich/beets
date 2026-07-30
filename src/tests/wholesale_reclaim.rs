@@ -1,14 +1,15 @@
-//! Integration pins for wholesale teardown: the `OWNS_ALL` switch and
-//! the tree fast paths it licenses. When the allocator owns all slot
-//! memory wholesale AND the values have no drop glue, the tree's `Drop`
-//! and `clear` must skip the per-node walk — teardown retires zero
-//! individual slots. When either condition fails, the walk (and every
-//! value drop it owes) must still happen.
+//! Integration pins for wholesale teardown: `reclaim_all` and the tree
+//! fast paths it licenses. When the allocator reclaims every slot's
+//! memory wholesale (`reclaim_all` → `true`) AND the values have no
+//! drop glue, the tree's `Drop` and `clear` must skip the per-node walk
+//! — teardown retires zero individual slots. When either condition
+//! fails, the walk (and every value drop it owes) must still happen.
 
 use crate::{common, common::counting};
 
 use std::{
     alloc::System,
+    mem::MaybeUninit,
     ptr::NonNull,
     sync::{
         Arc,
@@ -16,140 +17,156 @@ use std::{
     },
 };
 
-use crate::{BPlusTree, Inner, Leaf, Slabs, SlotAllocator};
+use crate::{BPlusTree, Inner, Leaf, NodeAllocator, Slabs};
 use common::{Counted, M, fill, v};
 
-/// The switch is an associated const — evaluable in const context, so
-/// the teardown branch folds away at monomorphization — and it is set
-/// honestly per allocator: the slab arena owns its slots wholesale, a
-/// box-per-node global allocator does not.
+/// `reclaim_all` is all-or-nothing and honest per allocator: the slab
+/// arena owns both pools wholesale, resets them, and reports `true`; a
+/// box-per-node global allocator cannot reclaim wholesale, so it must
+/// do nothing and report `false` — the trait default.
 #[test]
-fn owns_all_is_const_and_honest() {
-    const {
-        assert!(
-            <Slabs<u64, u64, M> as SlotAllocator<Leaf<u64, u64, M>>>::OWNS_ALL
-                && <Slabs<u64, u64, M> as SlotAllocator<Inner<u64, u64, M>>>::OWNS_ALL,
-            "the slab arena owns both pools wholesale"
-        );
-        assert!(
-            !<System as SlotAllocator<Leaf<u64, u64, M>>>::OWNS_ALL,
-            "a global allocator boxes each node separately and must not claim wholesale ownership"
-        );
-    }
+fn reclaim_all_is_honest_per_allocator() {
+    let mut arena: Slabs<u64, u64, M> = Slabs::new();
+    // SAFETY: no outstanding slots exist to invalidate.
+    let reclaimed = unsafe { arena.reclaim_all() };
+    assert!(reclaimed, "the slab arena owns both pools wholesale and must report the reset");
+
+    // SAFETY: no outstanding slots exist, and a `false` return
+    // obligates nothing anyway.
+    let reclaimed = unsafe { NodeAllocator::<u64, u64, M>::reclaim_all(&mut System) };
+    assert!(
+        !reclaimed,
+        "a global allocator boxes each node separately and must decline wholesale reclaim"
+    );
 }
 
-/// Forwards both node pools to a wrapped slab arena, tallying every
-/// per-slot `deallocate` and every `clear_all`, so tests can observe
-/// which teardown path the tree took. `OWNS_ALL` is inherited
-/// truthfully: the wrapped arena owns the memory, so the spy does too.
+/// Forwards to a wrapped slab arena, tallying every per-slot
+/// retirement (through the uninit primitives, which the provided
+/// value-level `dealloc_*` must route through) and every wholesale
+/// reclaim, so tests can observe which teardown path the tree took.
 struct Spy<V> {
     arena: Slabs<u64, V, M>,
     deallocs: Arc<AtomicUsize>,
-    leaf_clears: Arc<AtomicUsize>,
-    inner_clears: Arc<AtomicUsize>,
+    reclaims: Arc<AtomicUsize>,
 }
 
 impl<V> Spy<V> {
     fn new() -> Self {
-        Self {
-            arena: Slabs::new(),
-            deallocs: Arc::default(),
-            leaf_clears: Arc::default(),
-            inner_clears: Arc::default(),
-        }
+        Self { arena: Slabs::new(), deallocs: Arc::default(), reclaims: Arc::default() }
     }
 }
 
-impl<V> SlotAllocator<Leaf<u64, V, M>> for Spy<V> {
-    const OWNS_ALL: bool = true;
+impl<V> NodeAllocator<u64, V, M> for Spy<V> {
+    type Exhaustion = core::convert::Infallible;
 
-    fn allocate(&mut self, value: Leaf<u64, V, M>) -> NonNull<Leaf<u64, V, M>> {
-        self.arena.allocate(value)
+    fn try_alloc_leaf_uninit(
+        &mut self,
+    ) -> Result<NonNull<MaybeUninit<Leaf<u64, V, M>>>, Self::Exhaustion> {
+        self.arena.try_alloc_leaf_uninit()
     }
 
-    unsafe fn deallocate(&mut self, ptr: NonNull<Leaf<u64, V, M>>) -> Leaf<u64, V, M> {
+    fn try_alloc_inner_uninit(
+        &mut self,
+    ) -> Result<NonNull<MaybeUninit<Inner<u64, V, M>>>, Self::Exhaustion> {
+        self.arena.try_alloc_inner_uninit()
+    }
+
+    unsafe fn dealloc_leaf_uninit(&mut self, ptr: NonNull<MaybeUninit<Leaf<u64, V, M>>>) {
         self.deallocs.fetch_add(1, Relaxed);
         // SAFETY: forwarded — the caller's obligations are the arena's.
-        unsafe { self.arena.deallocate(ptr) }
+        unsafe { self.arena.dealloc_leaf_uninit(ptr) }
     }
 
-    unsafe fn clear_all(&mut self) {
-        self.leaf_clears.fetch_add(1, Relaxed);
-        // SAFETY: forwarded — the caller's obligations are the arena's.
-        unsafe { SlotAllocator::<Leaf<u64, V, M>>::clear_all(&mut self.arena) }
-    }
-}
-
-impl<V> SlotAllocator<Inner<u64, V, M>> for Spy<V> {
-    const OWNS_ALL: bool = true;
-
-    fn allocate(&mut self, value: Inner<u64, V, M>) -> NonNull<Inner<u64, V, M>> {
-        self.arena.allocate(value)
-    }
-
-    unsafe fn deallocate(&mut self, ptr: NonNull<Inner<u64, V, M>>) -> Inner<u64, V, M> {
+    unsafe fn dealloc_inner_uninit(&mut self, ptr: NonNull<MaybeUninit<Inner<u64, V, M>>>) {
         self.deallocs.fetch_add(1, Relaxed);
         // SAFETY: forwarded — the caller's obligations are the arena's.
-        unsafe { self.arena.deallocate(ptr) }
+        unsafe { self.arena.dealloc_inner_uninit(ptr) }
     }
 
-    unsafe fn clear_all(&mut self) {
-        self.inner_clears.fetch_add(1, Relaxed);
+    fn leaf_capacity(&self) -> Option<usize> {
+        self.arena.leaf_capacity()
+    }
+
+    fn inner_capacity(&self) -> Option<usize> {
+        self.arena.inner_capacity()
+    }
+
+    fn leaf_available(&self) -> usize {
+        self.arena.leaf_available()
+    }
+
+    fn inner_available(&self) -> usize {
+        self.arena.inner_available()
+    }
+
+    unsafe fn reclaim_all(&mut self) -> bool {
+        self.reclaims.fetch_add(1, Relaxed);
         // SAFETY: forwarded — the caller's obligations are the arena's.
-        unsafe { SlotAllocator::<Inner<u64, V, M>>::clear_all(&mut self.arena) }
+        unsafe { self.arena.reclaim_all() }
     }
 }
 
-/// An allocator that is honest per pool but ASYMMETRIC: leaf slots come
-/// from a slab arena that owns them wholesale (`OWNS_ALL = true` on the
-/// leaf impl, truthfully — the arena's drop reclaims them), while every
-/// inner node is its own boxed allocation through a counting backing
-/// (`OWNS_ALL = false` on the inner impl, equally truthfully — an inner
-/// never passed to `deallocate` is leaked memory).
+/// An allocator that is honest but ASYMMETRIC: leaf slots come from a
+/// slab arena, while every inner node is its own boxed allocation
+/// through a counting backing. Wholesale reclaim is therefore
+/// impossible — the boxed inners can only be retired one at a time —
+/// so `reclaim_all` declines, which is exactly the trait default (no
+/// override below).
 struct Lopsided {
     leaves: Slabs<u64, u64, M>,
     inners: common::Counting,
 }
 
-impl SlotAllocator<Leaf<u64, u64, M>> for Lopsided {
-    const OWNS_ALL: bool = true;
+impl NodeAllocator<u64, u64, M> for Lopsided {
+    type Exhaustion = core::convert::Infallible;
 
-    fn allocate(&mut self, value: Leaf<u64, u64, M>) -> NonNull<Leaf<u64, u64, M>> {
-        self.leaves.allocate(value)
+    fn try_alloc_leaf_uninit(
+        &mut self,
+    ) -> Result<NonNull<MaybeUninit<Leaf<u64, u64, M>>>, Self::Exhaustion> {
+        self.leaves.try_alloc_leaf_uninit()
     }
 
-    unsafe fn deallocate(&mut self, ptr: NonNull<Leaf<u64, u64, M>>) -> Leaf<u64, u64, M> {
+    fn try_alloc_inner_uninit(
+        &mut self,
+    ) -> Result<NonNull<MaybeUninit<Inner<u64, u64, M>>>, Self::Exhaustion> {
+        self.inners.try_alloc_inner_uninit()
+    }
+
+    unsafe fn dealloc_leaf_uninit(&mut self, ptr: NonNull<MaybeUninit<Leaf<u64, u64, M>>>) {
         // SAFETY: forwarded — the caller's obligations are the arena's.
-        unsafe { self.leaves.deallocate(ptr) }
+        unsafe { self.leaves.dealloc_leaf_uninit(ptr) }
     }
 
-    unsafe fn clear_all(&mut self) {
-        // SAFETY: forwarded — the caller's obligations are the arena's.
-        unsafe { SlotAllocator::<Leaf<u64, u64, M>>::clear_all(&mut self.leaves) }
-    }
-}
-
-impl SlotAllocator<Inner<u64, u64, M>> for Lopsided {
-    const OWNS_ALL: bool = false;
-
-    fn allocate(&mut self, value: Inner<u64, u64, M>) -> NonNull<Inner<u64, u64, M>> {
-        self.inners.allocate(value)
-    }
-
-    unsafe fn deallocate(&mut self, ptr: NonNull<Inner<u64, u64, M>>) -> Inner<u64, u64, M> {
+    unsafe fn dealloc_inner_uninit(&mut self, ptr: NonNull<MaybeUninit<Inner<u64, u64, M>>>) {
         // SAFETY: forwarded — the caller's obligations are the backing's.
-        unsafe { self.inners.deallocate(ptr) }
+        unsafe { self.inners.dealloc_inner_uninit(ptr) }
     }
 
-    // No `clear_all`: with `OWNS_ALL = false` it must never be called,
-    // and the trait default enforces that with a panic.
+    fn leaf_capacity(&self) -> Option<usize> {
+        self.leaves.leaf_capacity()
+    }
+
+    fn inner_capacity(&self) -> Option<usize> {
+        NodeAllocator::<u64, u64, M>::inner_capacity(&self.inners)
+    }
+
+    fn leaf_available(&self) -> usize {
+        self.leaves.leaf_available()
+    }
+
+    fn inner_available(&self) -> usize {
+        NodeAllocator::<u64, u64, M>::inner_available(&self.inners)
+    }
+
+    // No `reclaim_all` override: declining is the default, and declining
+    // is the truth here.
 }
 
 /// The teardown shortcut is licensed by ALL of the tree's node memory
-/// being wholesale-owned, not some of it: under an allocator whose
-/// inner nodes are individually boxed, dropping the tree must return
-/// every boxed inner through `deallocate` — whatever it does about the
-/// leaves.
+/// being wholesale-reclaimable, not some of it: under an allocator
+/// whose inner nodes are individually boxed, dropping the tree must
+/// return every boxed inner through per-slot retirement — whatever it
+/// does about the leaves.
 #[test]
 fn drop_retires_every_boxed_inner_under_an_asymmetric_allocator() {
     let counting = counting!();
@@ -166,9 +183,9 @@ fn drop_retires_every_boxed_inner_under_an_asymmetric_allocator() {
     counting.assert_balanced("boxed inner node");
 }
 
-/// With drop-free values under a whole-owning allocator, dropping the
-/// tree must not walk the nodes: zero per-slot retirements — the
-/// allocator's own drop reclaims all slot memory wholesale.
+/// With drop-free values under a wholesale-reclaiming allocator,
+/// dropping the tree must not walk the nodes: zero per-slot
+/// retirements — the allocator's own drop reclaims all slot memory.
 #[test]
 fn drop_skips_the_per_node_walk_for_plain_values() {
     let spy = Spy::<u64>::new();
@@ -181,20 +198,20 @@ fn drop_skips_the_per_node_walk_for_plain_values() {
     assert_eq!(
         deallocs.load(Relaxed),
         0,
-        "dropping a tree of drop-free values under a wholesale-owning allocator \
+        "dropping a tree of drop-free values under a wholesale-reclaiming allocator \
          must retire zero individual slots"
     );
 }
 
-/// With drop-free values under a whole-owning allocator, `clear` must
-/// release wholesale: zero per-slot retirements, each node pool reset
-/// exactly once, and the tree fresh and serviceable afterward.
+/// With drop-free values under a wholesale-reclaiming allocator,
+/// `clear` must release wholesale: zero per-slot retirements, exactly
+/// one `reclaim_all` covering both pools, and the tree fresh and
+/// serviceable afterward.
 #[test]
 fn clear_releases_wholesale_for_plain_values() {
     let spy = Spy::<u64>::new();
     let deallocs = Arc::clone(&spy.deallocs);
-    let leaf_clears = Arc::clone(&spy.leaf_clears);
-    let inner_clears = Arc::clone(&spy.inner_clears);
+    let reclaims = Arc::clone(&spy.reclaims);
 
     let mut tree: BPlusTree<u64, u64, M, Spy<u64>> = BPlusTree::new_in(spy);
     fill(&mut tree, 2_000);
@@ -203,11 +220,15 @@ fn clear_releases_wholesale_for_plain_values() {
     assert_eq!(
         deallocs.load(Relaxed),
         0,
-        "clearing a tree of drop-free values under a wholesale-owning allocator \
+        "clearing a tree of drop-free values under a wholesale-reclaiming allocator \
          must retire zero individual slots"
     );
-    assert_eq!(leaf_clears.load(Relaxed), 1, "clear must reset the leaf pool exactly once");
-    assert_eq!(inner_clears.load(Relaxed), 1, "clear must reset the inner pool exactly once");
+    assert_eq!(
+        reclaims.load(Relaxed),
+        1,
+        "clear must reset the allocator through exactly one reclaim_all call \
+         (it covers both pools)"
+    );
 
     assert!(tree.is_empty(), "a cleared tree holds no pairs");
     tree.insert(7, v(7));
