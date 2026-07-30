@@ -2,7 +2,7 @@ use core::mem::MaybeUninit;
 
 use crate::{
     Key, Slabs,
-    allocator::{Global, NodeAllocator, SlotAllocator},
+    allocator::{Global, NodeAllocator},
 };
 
 mod bulk;
@@ -152,13 +152,13 @@ where
 // SAFETY: sharing `&BPlusTree` shares a read-only tree. Every `&self`
 // method is a pure read of the node graph — descents, gets, iteration;
 // none mutates node memory through the `NonNull`s — and no `&self`
-// path can reach the allocator: [`SlotAllocator`]'s receivers are
-// `&mut self`, unreachable through a shared borrow, and nothing hands
-// out `&A`. The tree itself has no interior mutability, so while
-// shared borrows exist, no thread can write anything a reader
-// dereferences. What readers DO reach — `&K`s and `&V`s — is what the
-// `Sync` bounds sign for (`A: Sync` is defensive; no `&self` path
-// reads it today).
+// path can MUTATE the allocator: [`NodeAllocator`]'s slot-traffic
+// receivers are `&mut self`, unreachable through a shared borrow (its
+// `&self` capacity queries are pure reads of plain fields). The tree
+// itself has no interior mutability, so while shared borrows exist, no
+// thread can write anything a reader dereferences. What readers DO
+// reach — `&K`s and `&V`s — is what the `Sync` bounds sign for
+// (`A: Sync` is defensive; no `&self` path reads it today).
 //
 // Every future `&self` feature re-signs this contract; a
 // `&self`-written cache (the leaf-cache TODO atop this file) is the
@@ -212,7 +212,12 @@ impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Drop
     // value not yet reached. Because this is itself `Drop` glue, such a panic
     // during an already-unwinding drop double-panics and aborts.
     fn drop(&mut self) {
-        if const { Self::CAN_SKIP_DROP } {
+        // SAFETY: the tree is mid-drop — no node pointer is read after
+        // this, and the forgotten values were just checked drop-free.
+        if !core::mem::needs_drop::<V>() && unsafe { self.allocator.reclaim_all() } {
+            // Keys never need `drop`. When values don't need drop AND the
+            // allocator can reclaim all memory itself, we can skip subtree
+            // traversal.
             return;
         }
 
@@ -239,10 +244,6 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     /// A heuristic max height.
     pub const MAX_HEIGHT: usize = crate::max_height(M);
 
-    pub const CAN_SKIP_DROP: bool = !core::mem::needs_drop::<V>()
-        && <A as SlotAllocator<Leaf<K, V, M>>>::OWNS_ALL
-        && <A as SlotAllocator<Inner<K, V, M>>>::OWNS_ALL;
-
     const __LEVEL_CAP: () =
         assert!(H >= 1 && H <= usize::BITS as usize, "the level cap H must be in 1..=usize::BITS");
 
@@ -259,7 +260,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     pub fn new_in(mut allocator: A) -> Self {
         const { Self::__LEVEL_CAP };
 
-        let root = Node::from_leaf_ptr(allocator.allocate(Leaf::new(None)));
+        let root = Node::from_leaf_ptr(allocator.alloc_leaf(Leaf::new(None)));
         Self { root, height: 0, len: 0, allocator }
     }
 
@@ -377,16 +378,16 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
 
     /// Drop every pair, resetting to the empty tree.
     pub fn clear(&mut self) {
-        if const { Self::CAN_SKIP_DROP } {
-            // SAFETY:
-            // A::OWNS_ALL is checked by CAN_SKIP_DROP
-            // We immediately invalidate the tree by overwriting the root
-            // We kinow that V has no drop glue (checked by CAN_SKIP_DROP
-            unsafe {
-                SlotAllocator::<Leaf<K, V, M>>::clear_all(&mut self.allocator);
-                SlotAllocator::<Inner<K, V, M>>::clear_all(&mut self.allocator);
-            }
-        } else {
+        // Wholesale reset when values carry no drop glue (`K: Copy`
+        // always; `V` checked here) and the allocator can forget every
+        // slot at once; the per-node walk otherwise.
+        // SAFETY (reclaim_all): every node pointer it invalidates is
+        // dead — the root is overwritten immediately below, before
+        // anything can read it — and the forgotten values were just
+        // checked drop-free.
+        let reclaimed = !core::mem::needs_drop::<V>() && unsafe { self.allocator.reclaim_all() };
+
+        if !reclaimed {
             // SAFETY:
             // - `height` is the impl-block invariant — exactly the
             // height of `root`'s subtree. `root` is overwritten with a fresh
@@ -397,7 +398,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
             }
         }
 
-        self.root = Node::from_leaf_ptr(self.allocator.allocate(Leaf::new(None)));
+        self.root = Node::from_leaf_ptr(self.allocator.alloc_leaf(Leaf::new(None)));
         self.height = 0;
         self.len = 0;
     }

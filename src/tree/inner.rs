@@ -2,10 +2,7 @@ use core::{mem::MaybeUninit, ptr::NonNull};
 
 #[cfg(debug_assertions)]
 use crate::NodeKind;
-use crate::{
-    Key, Node,
-    allocator::{NodeAllocator, SlotAllocator},
-};
+use crate::{Key, Node, allocator::NodeAllocator};
 
 // TODO:
 // - perf: remove is the board's worst cell vs BTreeMap (see perf.md).
@@ -556,7 +553,7 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
     /// if the adoption forced a split. (The separator travels with the
     /// split because the caller holds only erased handles — and on an inner
     /// split the middle key is pushed up out of the node, not copied.)
-    pub(crate) fn splitting_insert_child<A: SlotAllocator<Self>>(
+    pub(crate) fn splitting_insert_child<A: NodeAllocator<K, V, M>>(
         &mut self,
         partition: usize,
         sep: K,
@@ -648,7 +645,7 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         self.child_count = Self::LEFT_COUNT + 1;
         right.child_count = M - Self::LEFT_COUNT;
 
-        (promoted, alloc.allocate(right))
+        (promoted, alloc.alloc_inner(right))
     }
 
     /// Adopt `sep`/`child` — the new right sibling produced when the child
@@ -662,7 +659,7 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
     /// [`splitting_insert_child`](Self::splitting_insert_child) ALWAYS splits, and
     /// [`insert_child_unchecked`](Self::insert_child_unchecked) never checks room — the occupancy
     /// decision lives here.
-    pub(crate) fn insert_child<A: SlotAllocator<Self>>(
+    pub(crate) fn insert_child<A: NodeAllocator<K, V, M>>(
         &mut self,
         partition: usize,
         sep: K,

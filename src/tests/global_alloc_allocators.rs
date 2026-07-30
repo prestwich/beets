@@ -6,12 +6,9 @@
 
 use crate::{common, common::counting};
 
-use std::{
-    alloc::System,
-    sync::atomic::{AtomicUsize, Ordering::Relaxed},
-};
+use std::alloc::System;
 
-use crate::{BPlusTree, NodeAllocator, Slabs, SlotAllocator};
+use crate::{BPlusTree, NodeAllocator, Slabs};
 use common::{Counting, M, fill, v};
 
 /// Compile-time half of the pin: `System` (a plain `GlobalAlloc`) must
@@ -20,7 +17,7 @@ fn assert_is_node_allocator<A: NodeAllocator<u64, u64, M>>() {}
 
 /// A `GlobalAlloc` implementor satisfies `NodeAllocator` — the bound the
 /// tree requires of its allocator parameter — without any hand-written
-/// `SlotAllocator` impls for the node types.
+/// per-node-type glue.
 #[test]
 fn a_global_allocator_satisfies_the_node_allocator_bound() {
     assert_is_node_allocator::<System>();
@@ -68,49 +65,6 @@ fn node_traffic_flows_through_the_supplied_allocator() {
     drop(tree);
 
     counting.assert_balanced("node");
-}
-
-/// `SlotAllocator`'s contract puts no lower bound on `size_of::<T>()`,
-/// so a `GlobalAlloc`-backed allocator must round-trip a zero-sized
-/// value — while staying inside `GlobalAlloc`'s own rules. The
-/// round-trip itself is checked here; the rules are what
-/// `cargo miri test` checks.
-#[test]
-fn a_zero_sized_value_round_trips_through_a_global_allocator() {
-    #[derive(Debug, PartialEq)]
-    struct Zst;
-
-    let ptr = System.allocate(Zst);
-    // SAFETY: `ptr` came from `allocate` on this allocator, is live,
-    // and is retired exactly once.
-    let got = unsafe { System.deallocate(ptr) };
-    assert_eq!(got, Zst, "deallocate must return exactly the value allocate moved in");
-}
-
-/// The round-trip owns the value exactly once, end to end: `allocate`
-/// moves it into the slot, `deallocate` moves it back out, and the one
-/// and only drop belongs to the caller afterward. Zero-sized values are
-/// not exempt.
-#[test]
-fn a_zero_sized_value_drops_exactly_once_through_the_round_trip() {
-    static DROPS: AtomicUsize = AtomicUsize::new(0);
-    struct DroppyZst;
-    impl Drop for DroppyZst {
-        fn drop(&mut self) {
-            DROPS.fetch_add(1, Relaxed);
-        }
-    }
-
-    let ptr = System.allocate(DroppyZst);
-    assert_eq!(DROPS.load(Relaxed), 0, "allocate must move the value into the slot, not drop it");
-
-    // SAFETY: `ptr` came from `allocate` on this allocator, is live,
-    // and is retired exactly once.
-    let got = unsafe { System.deallocate(ptr) };
-    assert_eq!(DROPS.load(Relaxed), 0, "deallocate must hand the value back, not drop it");
-
-    drop(got);
-    assert_eq!(DROPS.load(Relaxed), 1, "the caller's drop must be the only drop");
 }
 
 /// The slab arena's backing contract: slab memory is drawn from the

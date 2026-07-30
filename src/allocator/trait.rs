@@ -1,57 +1,112 @@
-//! The [`SlotAllocator`] trait and the global heap ([`Global`]) as its
+//! The [`NodeAllocator`] trait and the global heap ([`Global`]) as its
 //! default implementation; the contract lives on the parent module.
 
-use core::{alloc::Layout, ptr::NonNull};
+use core::{mem::MaybeUninit, ptr::NonNull};
 
 use crate::{Inner, Key, Leaf};
 
-/// An allocator of single `T`-slots at stable addresses.
+/// An allocator of node slots — `Leaf`s and `Inner`s — at stable
+/// addresses.
 ///
-/// The tree is generic over one of these (two bounds, one per node
-/// type, spelled once as the [`NodeAllocator`] alias). [`Global`] is
-/// the default and boxes each node as its own heap allocation;
-/// `slab.rs`'s [`Slabs`] is the packed alternative.
+/// The tree is generic over one of these. [`Slabs`] is the default and
+/// packs each node kind into its own slab pool; [`Global`] boxes each
+/// node as its own heap allocation.
+///
+/// The trait is deliberately NOT generic over what it allocates: it has
+/// exactly one consumer (the tree) and exactly two slot types, so each
+/// concept appears as a leaf/inner method pair instead of a type
+/// parameter. The primitive is UNINITIALIZED slot acquisition —
+/// [`alloc_leaf_uninit`](Self::alloc_leaf_uninit) and kin — separating
+/// storage acquisition from initialization; the value-moving methods
+/// are provided on top.
 ///
 /// # Contract (for implementors)
 ///
-/// - The pointer returned by [`allocate`](Self::allocate) refers to an
-///   initialized `T` holding exactly the passed value, and remains
-///   valid — same address, exclusively the caller's — until it is
-///   passed to [`deallocate`](Self::deallocate) or the allocator is
-///   dropped. Allocation is infallible: on heap exhaustion, abort via
-///   [`alloc::alloc::handle_alloc_error`] (matching [`Box`]).
-/// - Dropping the allocator must not read or drop any still-live `T` —
+/// - A slot pointer returned by [`alloc_leaf_uninit`](Self::alloc_leaf_uninit)/
+///   [`alloc_inner_uninit`](Self::alloc_inner_uninit) refers to
+///   storage valid for a node of that kind, and remains valid — same
+///   address, exclusively the caller's — until it is retired through the
+///   matching `dealloc_*` method or the allocator is dropped. The
+///   allocator never reads, writes, or moves a slot it has handed out;
+///   initialization is entirely the caller's.
+/// - Allocation is infallible: on exhaustion, abort via
+///   [`handle_alloc_error`] (matching [`Box`]).
+/// - The `dealloc_*_uninit` methods retire STORAGE only: they must not
+///   read the slot's contents (it may never have been initialized).
+/// - Dropping the allocator must not read or drop any still-live node —
 ///   teardown order (values first, then allocator) is the caller's job,
 ///   and the tree's [`Drop`] upholds it. Whether dropping also reclaims
-///   outstanding slots' MEMORY is [`OWNS_ALL`](Self::OWNS_ALL)'s call;
-///   under an `OWNS_ALL = false` allocator, a slot never
-///   [`deallocate`](Self::deallocate)d is leaked.
+///   outstanding slots' MEMORY is [`reclaim_all`](Self::reclaim_all)'s
+///   story: under an allocator whose `reclaim_all` returns `false`, a
+///   slot never deallocated is leaked.
 ///
 /// [`Slabs`]: crate::Slabs
-pub trait SlotAllocator<T> {
-    /// Whether this allocator owns every slot's memory WHOLESALE:
-    /// `true` promises that dropping the allocator — or calling
-    /// [`clear_all`](Self::clear_all) — reclaims all outstanding slot
-    /// memory with no per-slot [`deallocate`](Self::deallocate) needed.
-    /// `false` (the default, and the truth for the blanket
-    /// [`GlobalAlloc`](alloc::alloc::GlobalAlloc) impl, where every
-    /// slot is its own heap allocation) means slots not individually
-    /// deallocated are leaked.
-    ///
-    /// An associated const so teardown code can branch on it in const
-    /// context: each monomorphization keeps exactly one path and the
-    /// untaken block is never codegenned.
-    ///
-    /// Implementations declaring `true` MUST override
-    /// [`clear_all`](Self::clear_all).
-    const OWNS_ALL: bool = false;
+/// [`handle_alloc_error`]: alloc::alloc::handle_alloc_error
+pub trait NodeAllocator<K: Key, V, const M: usize> {
+    // ------------------------- required --------------------------
 
-    /// Move `value` into a fresh slot and return its address.
-    fn allocate(&mut self, value: T) -> NonNull<T>;
+    /// Hand out one uninitialized leaf slot at a stable address. The
+    /// slot is the caller's — the allocator never touches its contents
+    /// — until retired via
+    /// [`dealloc_leaf_uninit`](Self::dealloc_leaf_uninit) (never
+    /// initialized, or value already moved out) or
+    /// [`dealloc_leaf`](Self::dealloc_leaf) (initialized).
+    fn alloc_leaf_uninit(&mut self) -> NonNull<MaybeUninit<Leaf<K, V, M>>>;
+
+    /// As [`alloc_leaf_uninit`](Self::alloc_leaf_uninit), for an
+    /// inner-node slot.
+    fn alloc_inner_uninit(&mut self) -> NonNull<MaybeUninit<Inner<K, V, M>>>;
+
+    /// Retire a leaf slot WITHOUT reading it — the return path for
+    /// acquired-but-never-initialized slots, and the storage-reclaim
+    /// half of [`dealloc_leaf`](Self::dealloc_leaf). The slot may be
+    /// reused by a later allocation immediately.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have come from
+    ///   [`alloc_leaf_uninit`](Self::alloc_leaf_uninit) on THIS
+    ///   allocator, not yet retired (each slot retires exactly once).
+    /// - If the slot was initialized, the value must already have been
+    ///   moved out or dropped — this method reclaims storage only.
+    /// - No pointer to the slot may be used after this call.
+    unsafe fn dealloc_leaf_uninit(&mut self, ptr: NonNull<MaybeUninit<Leaf<K, V, M>>>);
+
+    /// As [`dealloc_leaf_uninit`](Self::dealloc_leaf_uninit), for an
+    /// inner-node slot.
+    ///
+    /// # Safety
+    ///
+    /// As [`dealloc_leaf_uninit`](Self::dealloc_leaf_uninit).
+    unsafe fn dealloc_inner_uninit(&mut self, ptr: NonNull<MaybeUninit<Inner<K, V, M>>>);
+
+    // ------------------------- provided --------------------------
+
+    /// Move `leaf` into a fresh slot and return its (stable) address.
+    /// Uninit acquisition ([`alloc_leaf_uninit`](Self::alloc_leaf_uninit))
+    /// plus the initializing write.
+    fn alloc_leaf(&mut self, leaf: Leaf<K, V, M>) -> NonNull<Leaf<K, V, M>> {
+        let slot = self.alloc_leaf_uninit().cast();
+
+        unsafe {
+            slot.write(leaf);
+        }
+        slot
+    }
+
+    /// As [`alloc_leaf`](Self::alloc_leaf), for an inner node.
+    fn alloc_inner(&mut self, inner: Inner<K, V, M>) -> NonNull<Inner<K, V, M>> {
+        let slot = self.alloc_inner_uninit().cast();
+
+        unsafe {
+            slot.write(inner);
+        }
+        slot
+    }
 
     /// Move the value out of `ptr`'s slot and retire the slot. The
-    /// returned `T` is the caller's; the slot may be reused by a later
-    /// [`allocate`](Self::allocate) immediately.
+    /// returned `Leaf` is the caller's; the slot may be reused by a
+    /// later allocation immediately.
     ///
     /// (Returns the value — rather than expecting the caller to have
     /// moved it out — to mirror `*Box::from_raw`, so the `into_leaf`/
@@ -60,100 +115,138 @@ pub trait SlotAllocator<T> {
     ///
     /// # Safety
     ///
-    /// - `ptr` must have come from [`allocate`](Self::allocate) on THIS allocator, not yet
-    ///   deallocated (each slot retires exactly once).
-    /// - The slot must hold an initialized `T`, and no other pointer to
-    ///   it may be used after this call.
-    unsafe fn deallocate(&mut self, ptr: NonNull<T>) -> T;
+    /// - `ptr` must have come from a leaf allocation on THIS allocator,
+    ///   not yet retired.
+    /// - The slot must hold an initialized `Leaf`, and no other
+    ///   pointer to it may be used after this call.
+    unsafe fn dealloc_leaf(&mut self, ptr: NonNull<Leaf<K, V, M>>) -> Leaf<K, V, M> {
+        // SAFETY:
+        // as trait function contract.
+        // - `ptr` must have come from a leaf allocation on THIS allocator,
+        //   not yet retired.
+        // - The slot must hold an initialized [`Leaf`], and no other
+        //   pointer to it may be used after this call.
+        unsafe {
+            let val = ptr.read();
+            self.dealloc_leaf_uninit(ptr.cast());
+            val
+        }
+    }
 
-    /// Forget every outstanding slot at once, leaving the allocator
-    /// empty and immediately reusable — the wholesale counterpart of
-    /// retiring slots one [`deallocate`](Self::deallocate) at a time,
-    /// for a caller abandoning its whole structure in one stroke.
-    ///
-    /// Reclaims MEMORY only, like the drop clause of the trait
-    /// contract: values still resident in slots are forgotten, never
-    /// read or dropped.
-    ///
-    /// (The `&mut self` receiver carries extra weight here: this call
-    /// invalidates every outstanding slot pointer, so exclusivity is
-    /// the point, not just the trait's uniform calling convention — no
-    /// held borrow of the allocator can witness the reset.)
+    /// As [`dealloc_leaf`](Self::dealloc_leaf), for an inner node.
     ///
     /// # Safety
     ///
-    /// - Callable only when [`OWNS_ALL`](Self::OWNS_ALL) is `true`;
-    ///   the default body panics.
-    /// - Every pointer previously returned by
-    ///   [`allocate`](Self::allocate) is invalidated — the caller must
-    ///   never use any of them again.
-    /// - Still-resident values are forgotten: the caller must have
+    /// As [`dealloc_leaf`](Self::dealloc_leaf).
+    unsafe fn dealloc_inner(&mut self, ptr: NonNull<Inner<K, V, M>>) -> Inner<K, V, M> {
+        // SAFETY:
+        // as trait function contract.
+        // - `ptr` must have come from a inner allocation on THIS allocator,
+        //   not yet retired.
+        // - The slot must hold an initialized [`Inner`], and no other
+        //   pointer to it may be used after this call.
+        unsafe {
+            let val = ptr.read();
+            self.dealloc_inner_uninit(ptr.cast());
+            val
+        }
+    }
+
+    /// Wholesale reclaim: forget every outstanding slot of BOTH node
+    /// kinds at once, leaving the allocator empty and immediately
+    /// reusable — or do nothing at all. All-or-nothing: `true` means
+    /// every slot's memory was reclaimed with no per-slot retirement;
+    /// `false` (the default, and the truth for [`Global`], where every
+    /// slot is its own heap allocation) means nothing happened and the
+    /// caller must retire slots individually or accept the leak.
+    ///
+    /// Reclaims MEMORY only: values still resident in slots are
+    /// forgotten, never read or dropped.
+    ///
+    /// (The `&mut self` receiver carries extra weight here: a `true`
+    /// return invalidates every outstanding slot pointer, so exclusivity
+    /// is the point, not just the trait's uniform calling convention —
+    /// no held borrow of the allocator can witness the reset.)
+    ///
+    /// # Safety
+    ///
+    /// On a `true` return:
+    ///
+    /// - every pointer previously handed out by this allocator is
+    ///   invalidated — the caller must never use any of them again.
+    /// - still-resident values are forgotten: the caller must have
     ///   already dropped them, or know that forgetting them has no
     ///   observable effect (no drop glue that matters).
-    unsafe fn clear_all(&mut self) {
-        assert!(
-            Self::OWNS_ALL,
-            "attempted to call clear_all on an allocator that does not declare that it owns its memory"
-        );
-        unimplemented!("clear_all is only callable on allocators declaring OWNS_ALL")
+    ///
+    /// On a `false` return nothing has changed and no obligation arises.
+    unsafe fn reclaim_all(&mut self) -> bool {
+        false
     }
 }
 
-/// Alias for the tree's allocator bound: one `A` must serve slots for
-/// both node types. Blanket-implemented, so it is never implemented by
-/// hand — write `impl SlotAllocator<Leaf<..>> for X` and
-/// `impl SlotAllocator<Inner<..>> for X`, and `X: NodeAllocator` follows.
-pub trait NodeAllocator<K: Key, V, const M: usize>:
-    SlotAllocator<Leaf<K, V, M>> + SlotAllocator<Inner<K, V, M>>
-{
-}
-
-impl<K: Key, V, const M: usize, A> NodeAllocator<K, V, M> for A where
-    A: SlotAllocator<Leaf<K, V, M>> + SlotAllocator<Inner<K, V, M>>
-{
-}
-
-impl<T, G> SlotAllocator<T> for G
+/// Every [`GlobalAlloc`](core::alloc::GlobalAlloc) is a node allocator:
+/// each slot is its own heap allocation, acquired and released
+/// per-node. Exhaustion is handled by aborting
+/// ([`handle_alloc_error`](alloc::alloc::handle_alloc_error), the
+/// [`Box`] posture).
+impl<K: Key, V, const M: usize, G> NodeAllocator<K, V, M> for G
 where
     G: core::alloc::GlobalAlloc,
 {
-    fn allocate(&mut self, value: T) -> NonNull<T> {
-        if const { core::mem::size_of::<T>() == 0 } {
-            // NB: this is not a memory leak, as T is a ZST
-            core::mem::forget(value);
-            return NonNull::dangling();
-        }
+    // Design notes pinned during the redesign, for all four bodies:
+    // - Exhaustion (a null from `GlobalAlloc::alloc`) aborts via
+    //   `handle_alloc_error`, the `Box` posture — the trait contract's
+    //   infallibility clause.
+    // - No ZST shortcut needed, unlike the old generic-over-T blanket:
+    //   the only slot types are `Leaf`/`Inner`, never zero-sized
+    //   (`M >= 3`), so `Layout::new::<..>()` is always non-empty.
 
+    fn alloc_leaf_uninit(&mut self) -> NonNull<MaybeUninit<Leaf<K, V, M>>> {
+        let layout = core::alloc::Layout::new::<MaybeUninit<Leaf<K, V, M>>>();
         // SAFETY:
-        // The layout is valid, the ptr is checked before non-null is
-        // constructed, We shortcut earllier on ZSTs.
+        // Leaf is never a ZST.
+        // NonNull::new_unchecked is checked by if ptr.is_null divergence.
         unsafe {
-            let layout = alloc::alloc::Layout::new::<T>();
             let ptr = self.alloc(layout);
             if ptr.is_null() {
                 ::alloc::alloc::handle_alloc_error(layout)
             }
-
-            let ptr = NonNull::new_unchecked(ptr).cast();
-            ptr.write(value);
-            ptr
+            NonNull::new_unchecked(ptr).cast()
         }
     }
 
-    unsafe fn deallocate(&mut self, ptr: NonNull<T>) -> T {
+    fn alloc_inner_uninit(&mut self) -> NonNull<MaybeUninit<Inner<K, V, M>>> {
+        let layout = core::alloc::Layout::new::<MaybeUninit<Inner<K, V, M>>>();
         // SAFETY:
-        // as trait fn docs. ptr is non-null, value must be valid.
-        // caller must be 18 years or older, not located in Nebraska
+        // Inner is never a ZST.
+        // NonNull::new_unchecked is checked by if ptr.is_null divergence.
+        // Cast is safe, as MaybeUninit has the same
         unsafe {
-            // NB: if T is a ZST this will be a dangling pointer, but it's fine.
-            let val = ptr.read();
-
-            // SAFETY: ptr is non-null, layout is accurate, we check for ZST.
-            if const { core::mem::size_of::<T>() != 0 } {
-                self.dealloc(ptr.as_ptr().cast(), Layout::new::<T>());
+            let ptr = self.alloc(layout);
+            if ptr.is_null() {
+                ::alloc::alloc::handle_alloc_error(layout)
             }
+            NonNull::new_unchecked(ptr).cast()
+        }
+    }
 
-            val
+    unsafe fn dealloc_leaf_uninit(&mut self, ptr: NonNull<MaybeUninit<Leaf<K, V, M>>>) {
+        let layout = core::alloc::Layout::new::<Leaf<K, V, M>>();
+        // Safety:
+        // as in trait safety contract. Caller must ensure that ptr was
+        // allocated by this allocator.
+        unsafe {
+            self.dealloc(ptr.as_ptr().cast(), layout);
+        }
+    }
+
+    unsafe fn dealloc_inner_uninit(&mut self, ptr: NonNull<MaybeUninit<Inner<K, V, M>>>) {
+        let layout = core::alloc::Layout::new::<Inner<K, V, M>>();
+        // Safety:
+        // as in trait safety contract. Caller must ensure that ptr was
+        // allocated by this allocator.
+        unsafe {
+            self.dealloc(ptr.as_ptr().cast(), layout);
         }
     }
 }
@@ -166,12 +259,12 @@ pub struct Global;
 // registered global allocator, which upholds `GlobalAlloc`'s contract
 // (live, layout-matched blocks; no unwinding).
 unsafe impl ::alloc::alloc::GlobalAlloc for Global {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         // SAFETY: passthrough. same requirements
         unsafe { ::alloc::alloc::alloc(layout) }
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
         // SAFETY: passthrough. same requirements
         unsafe {
             ::alloc::alloc::dealloc(ptr, layout);

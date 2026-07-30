@@ -17,7 +17,7 @@ use crate::{
     test_util::{Counted, M, counted_leaf},
 };
 
-impl<K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>> Unyielded<'_, K, V, M, A> {
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Unyielded<'_, K, V, M, A> {
     /// Test-only raw view of the held leaf, for chain-link assertions
     /// (the field itself stays private).
     pub(crate) fn as_ptr(&self) -> NonNull<Leaf<K, V, M>> {
@@ -29,9 +29,9 @@ impl<K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>> Unyielded<'_, K
     pub(crate) fn into_leaf(self) -> Leaf<K, V, M> {
         let this = core::mem::ManuallyDrop::new(self);
         // SAFETY: the guard held the only handle to the leaf, and
-        // `ManuallyDrop` keeps it from re-retiring the slot `deallocate`
-        // reclaims here.
-        unsafe { this.1.borrow_mut().deallocate(this.0) }
+        // `ManuallyDrop` keeps it from re-retiring the slot
+        // `dealloc_leaf` reclaims here.
+        unsafe { this.1.borrow_mut().dealloc_leaf(this.0) }
     }
 }
 

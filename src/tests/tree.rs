@@ -157,7 +157,7 @@ fn drop_subtree_at_height_zero_drops_the_leafs_values_exactly_once() {
     for k in 0..3 {
         leaf.raw_append(k, Counted::new(k, &live));
     }
-    let node: Node<u64, Counted, M> = Node::from_leaf_ptr(Global.allocate(leaf));
+    let node: Node<u64, Counted, M> = Node::from_leaf_ptr(Global.alloc_leaf(leaf));
     assert_eq!(live.load(Relaxed), 3, "one live value per stored key before teardown");
 
     // SAFETY: `node` roots a single leaf (height 0) and owns it.

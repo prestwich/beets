@@ -12,9 +12,10 @@ use core::{
 use crate::{Inner, Key, Leaf, Node};
 
 /// Box `value` and leak it, returning the raw handle — the fixture
-/// builders' node-allocation idiom, equivalent to
-/// `crate::Global.allocate(value)`. Non-test code allocates through
-/// `SlotAllocator` only; a `leak(` outside this module is a bypass.
+/// builders' node-allocation idiom, equivalent to allocating the node
+/// through `crate::Global`. Non-test code allocates through
+/// [`NodeAllocator`](crate::NodeAllocator) only; a `leak(` outside this
+/// module is a bypass.
 #[inline]
 pub(crate) fn leak<T>(value: T) -> NonNull<T> {
     NonNull::from(Box::leak(Box::new(value)))

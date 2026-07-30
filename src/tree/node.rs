@@ -1,9 +1,6 @@
 use core::ptr::NonNull;
 
-use crate::{
-    Inner, Key, Leaf,
-    allocator::{NodeAllocator, SlotAllocator},
-};
+use crate::{Inner, Key, Leaf, allocator::NodeAllocator};
 
 /// Debug-only node-kind tag. In debug builds it is the first field of both
 /// [`Leaf`] and [`Inner`] (which are `repr(C)` there), so the cast accessors on
@@ -52,7 +49,7 @@ pub(crate) union Node<K: Key, V, const M: usize> {
 /// ensure `self` points at the named kind** — it is not enforced by the
 /// type system.
 macro_rules! cast_accessors {
-    ($Kind:ident, $field:ident: $as_ref:ident, $as_mut:ident, $into:ident) => {
+    ($Kind:ident, $field:ident: $as_ref:ident, $as_mut:ident, $into:ident via $dealloc:ident) => {
         /// # Safety
         ///
         /// The caller must ensure that `self` is a
@@ -93,7 +90,7 @@ macro_rules! cast_accessors {
         /// which is not enforced by the type system, and that `alloc` is
         /// the allocator this node came from.
         #[track_caller]
-        pub(crate) unsafe fn $into<A: SlotAllocator<$Kind<K, V, M>>>(
+        pub(crate) unsafe fn $into<A: NodeAllocator<K, V, M>>(
             self,
             alloc: &mut A,
         ) -> $Kind<K, V, M> {
@@ -101,7 +98,7 @@ macro_rules! cast_accessors {
             self.assert_kind(NodeKind::$Kind);
             // SAFETY: the pointer came from `alloc` (caller vouches) and
             // `self` is consumed — no other path to this slot remains.
-            unsafe { alloc.deallocate(self.$field) }
+            unsafe { alloc.$dealloc(self.$field) }
         }
     };
 }
@@ -142,11 +139,11 @@ macro_rules! dispatch {
 }
 
 impl<K: Key, V, const M: usize> Node<K, V, M> {
-    pub(crate) fn from_inner<A: SlotAllocator<Inner<K, V, M>>>(
+    pub(crate) fn from_inner<A: NodeAllocator<K, V, M>>(
         inner: Inner<K, V, M>,
         alloc: &mut A,
     ) -> Self {
-        Self { inner: alloc.allocate(inner) }
+        Self { inner: alloc.alloc_inner(inner) }
     }
 
     /// Wrap an already-boxed leaf: the right sibling handed back by
@@ -184,8 +181,8 @@ impl<K: Key, V, const M: usize> Node<K, V, M> {
         );
     }
 
-    cast_accessors! { Leaf, leaf: as_leaf, as_leaf_mut, into_leaf }
-    cast_accessors! { Inner, inner: as_inner, as_inner_mut, into_inner }
+    cast_accessors! { Leaf, leaf: as_leaf, as_leaf_mut, into_leaf via dealloc_leaf }
+    cast_accessors! { Inner, inner: as_inner, as_inner_mut, into_inner via dealloc_inner }
 
     dispatch! {
         /// The occupancy of THIS node — NOT the entry count of the subtree

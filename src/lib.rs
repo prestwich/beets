@@ -48,7 +48,7 @@
 extern crate alloc;
 
 mod allocator;
-pub use allocator::{Global, NodeAllocator, Slabs, SlotAllocator};
+pub use allocator::{Global, NodeAllocator, Slabs};
 
 mod key;
 pub use key::Key;

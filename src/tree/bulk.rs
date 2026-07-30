@@ -24,10 +24,7 @@ use core::{
     ptr::NonNull,
 };
 
-use crate::{
-    BPlusTree, DEFAULT_MAX_LEVELS, Inner, Key, Leaf, Node,
-    allocator::{NodeAllocator, SlotAllocator},
-};
+use crate::{BPlusTree, DEFAULT_MAX_LEVELS, Inner, Key, Leaf, Node, allocator::NodeAllocator};
 
 /// A [`Leaf`] node that has been constructed but not yet enrolled in any tree.
 ///
@@ -35,26 +32,24 @@ use crate::{
 /// loading: it holds (a shared handle to) the allocator the leaf came
 /// from, so its [`Drop`] can return the slot while the loader goes on
 /// allocating through the same allocator.
-pub(crate) struct Unyielded<'a, K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>>(
+pub(crate) struct Unyielded<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>>(
     NonNull<Leaf<K, V, M>>,
     &'a RefCell<A>,
 );
 
-impl<K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>> Drop
-    for Unyielded<'_, K, V, M, A>
-{
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Drop for Unyielded<'_, K, V, M, A> {
     fn drop(&mut self) {
         // SAFETY: the pending is used only during from_fn iter construction
         // and is known to be totally owned while it exists; its slot came
         // from the held allocator.
-        drop(unsafe { self.1.borrow_mut().deallocate(self.0) })
+        drop(unsafe { self.1.borrow_mut().dealloc_leaf(self.0) })
     }
 }
 
-impl<'a, K: Key, V, const M: usize, A: SlotAllocator<Leaf<K, V, M>>> Unyielded<'a, K, V, M, A> {
+impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>> Unyielded<'a, K, V, M, A> {
     /// Create a new [`Unyielded`] by moving a leaf into `alloc`.
     fn leaking_new(leaf: Leaf<K, V, M>, alloc: &'a RefCell<A>) -> Self {
-        Self(alloc.borrow_mut().allocate(leaf), alloc)
+        Self(alloc.borrow_mut().alloc_leaf(leaf), alloc)
     }
 
     /// Convert into a [`Node`]. This is the intended way to pass off ownership
@@ -233,7 +228,7 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
                 // If there is no current `Inner` at this layer, we make a new
                 // `Inner` containing the incoming node as its first child.
                 lvl.current =
-                    Some((key, alloc.borrow_mut().allocate(Inner::from_first_child(node))));
+                    Some((key, alloc.borrow_mut().alloc_inner(Inner::from_first_child(node))));
                 // Occupying level `H - 1` would stand the finished tree at `H
                 // + 1` levels. This would
                 assert!(
@@ -489,7 +484,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     ) -> impl Iterator<Item = Unyielded<'a, K, V, M, A>> + use<'a, I, K, V, M, A>
     where
         I: Iterator<Item = (K, V)>,
-        A: SlotAllocator<Leaf<K, V, M>>,
+        A: NodeAllocator<K, V, M>,
     {
         // One leaf of delay: a leaf is yielded only once its successor
         // exists (or the source is exhausted), so its `next` is already
