@@ -27,6 +27,19 @@ Exceptions:
   building or running tests are not "bugs" in this sense. Report and handle
   those plainly.
 
+## Pre-push checks
+
+`cargo build`/`cargo test` don't catch broken rustdoc links. Before
+pushing, also run the Docs job's exact check:
+
+```sh
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items --all-features
+```
+
+This matters most for doc comments on stub/`todo!()` methods that link
+to a sibling API — if that sibling doesn't exist yet, the link is dead
+and only this command (not build/test) catches it.
+
 ## perf.md
 
 `perf.md` tracks the perf workstream: the target workload, ideas tried
