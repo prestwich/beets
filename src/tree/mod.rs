@@ -335,7 +335,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         })
     }
 
-    /// Copy the first key, and a mutable reference to its value.
+    /// Copy the first key, and get a mutable reference to its value.
     pub fn first_key_value_mut(&mut self) -> Option<(K, &mut V)> {
         (!self.is_empty()).then(|| {
             let leaf = self.first_leaf_mut();
@@ -349,7 +349,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         leaf.len().checked_sub(1).map(|last| leaf.kv_ref_unchecked(last))
     }
 
-    /// Copy the first key, and a mutable reference to its value.
+    /// Copy the last key, and get a mutable reference to its value.
     pub fn last_key_value_mut(&mut self) -> Option<(K, &mut V)> {
         let leaf = self.last_leaf_mut();
         leaf.len().checked_sub(1).map(|last| leaf.kv_mut_unchecked(last))
