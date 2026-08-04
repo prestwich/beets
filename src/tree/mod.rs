@@ -13,6 +13,7 @@ mod inner;
 pub use inner::Inner;
 
 mod iter;
+pub(crate) use iter::{FullIterator, IntoIter, Range};
 
 mod leaf;
 pub use leaf::Leaf;
@@ -159,10 +160,6 @@ where
 // thread can write anything a reader dereferences. What readers DO
 // reach — `&K`s and `&V`s — is what the `Sync` bounds sign for
 // (`A: Sync` is defensive; no `&self` path reads it today).
-//
-// Every future `&self` feature re-signs this contract; a
-// `&self`-written cache (the leaf-cache TODO atop this file) is the
-// standing example of what would break it.
 unsafe impl<K, V, const M: usize, A, const H: usize> Sync for BPlusTree<K, V, M, A, H>
 where
     K: Key + Sync,
@@ -289,6 +286,14 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         descend!(self, ref |inner| inner.children_ref().last().expect("no empty inner nodes"))
     }
 
+    /// Get a reference to the last leaf of the tree.
+    pub(crate) fn last_leaf_mut(&mut self) -> &mut Leaf<K, V, M> {
+        descend!(self, mut |inner| {
+            let last = inner.len() - 1;
+            &mut inner.children_mut()[last]
+        })
+    }
+
     /// Find the leaf whose range contains the key. That leaf may or may not
     /// contain a value at that key
     pub(crate) fn find_leaf(&self, key: &K) -> &Leaf<K, V, M> {
@@ -301,9 +306,19 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         descend!(self, mut |inner| inner.child_for_key_mut(key))
     }
 
+    /// Get a reference to the stored key and value for `key`, if it is present
+    pub fn get_key_value(&self, key: &K) -> Option<(&K, &V)> {
+        self.find_leaf(key).get_kv(key)
+    }
+
     /// Get a reference to the value for `key`, if it is present.
     pub fn get(&self, key: &K) -> Option<&V> {
         self.find_leaf(key).get(key)
+    }
+
+    /// True if `key` is present.
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
     }
 
     /// Get a mutable reference to the value for `key`, if it is present.
@@ -311,9 +326,33 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         self.find_leaf_mut(key).get_mut(key)
     }
 
-    /// True if `key` is present.
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.get(key).is_some()
+    /// The minimum-key pair, or `None` if the tree is empty.
+    pub fn first_key_value(&self) -> Option<(&K, &V)> {
+        // If the tree is non-empty, the first leaf is non empty
+        (!self.is_empty()).then(|| {
+            let leaf = self.first_leaf();
+            leaf.kv_ref_unchecked(0)
+        })
+    }
+
+    /// Copy the first key, and a mutable reference to its value.
+    pub fn first_key_value_mut(&mut self) -> Option<(K, &mut V)> {
+        (!self.is_empty()).then(|| {
+            let leaf = self.first_leaf_mut();
+            leaf.kv_mut_unchecked(0)
+        })
+    }
+
+    /// The maximum-key pair, or `None` if the tree is empty.
+    pub fn last_key_value(&self) -> Option<(&K, &V)> {
+        let leaf = self.last_leaf();
+        leaf.len().checked_sub(1).map(|last| leaf.kv_ref_unchecked(last))
+    }
+
+    /// Copy the first key, and a mutable reference to its value.
+    pub fn last_key_value_mut(&mut self) -> Option<(K, &mut V)> {
+        let leaf = self.last_leaf_mut();
+        leaf.len().checked_sub(1).map(|last| leaf.kv_mut_unchecked(last))
     }
 
     /// Insert a key-value pair, returning the previous value if the key was
@@ -332,11 +371,12 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         // SAFETY: the descent is fresh from `descend` under this borrow,
         // the tree untouched since, and `exact` is false.
         unsafe { descent.commit_insert(key, val) };
+
         None
     }
 
-    /// Remove `key`, returning its value if it was present.
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    /// Remove `key`, returning the stored copy of the key as well as the value.
+    pub fn remove_key_value(&mut self, key: &K) -> Option<(K, V)> {
         let mut slot = MaybeUninit::uninit();
         let descent = self.descend_into(key, &mut slot);
         if !descent.exact {
@@ -345,7 +385,12 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
 
         // SAFETY: the descent is fresh from `descend` under this borrow,
         // the tree untouched since, and `exact` is true.
-        Some(unsafe { descent.commit_remove() }.1)
+        Some(unsafe { descent.commit_remove() })
+    }
+
+    /// Remove `key`, returning its value if it was present.
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.remove_key_value(key).map(|(_, v)| v)
     }
 
     /// Pop the first element of the tree, returning the KV pair.
@@ -448,20 +493,6 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         iter::RangeMut::new(self, range)
     }
 
-    /// The minimum-key pair, or `None` if the tree is empty.
-    pub fn first_key_value(&self) -> Option<(&K, &V)> {
-        // Only the empty tree's root leaf is empty; any other first
-        // leaf holds its subtree's minimum at index 0.
-        let leaf = self.first_leaf();
-        (leaf.len() > 0).then(|| leaf.kv_ref_unchecked(0))
-    }
-
-    /// The maximum-key pair, or `None` if the tree is empty.
-    pub fn last_key_value(&self) -> Option<(&K, &V)> {
-        let leaf = self.last_leaf();
-        leaf.len().checked_sub(1).map(|last| leaf.kv_ref_unchecked(last))
-    }
-
     /// Iterate over the keys, in ascending order.
     pub fn keys(&self) -> impl core::iter::Iterator<Item = &K> {
         self.iter().map(|(k, _)| k)
@@ -476,6 +507,27 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
     pub fn values_mut(&mut self) -> impl core::iter::Iterator<Item = &mut V> {
         self.iter_mut().map(|(_, v)| v)
     }
+
+    /// Move every pair of `other` into `self`, leaving `other` empty.
+    /// Where a key exists in both, `self`'s previous value is dropped
+    /// and `other`'s is kept — [`insert`](Self::insert)'s overwrite
+    /// semantics, applied pairwise.
+    ///
+    /// Unlike [`BTreeMap::append`](https://doc.rust-lang.org/std/collections/struct.BTreeMap.html#method.append),
+    /// which splices `other`'s nodes into `self` directly
+    /// (`O(other.len() * log(self.len() / other.len()))`, no individual
+    /// pair touched), this crate can't reparent nodes between two
+    /// `allocator` instances the same way — each node an allocator hands
+    /// out must be retired through that SAME allocator (see
+    /// [`NodeAllocator`]'s contract), and `other`'s nodes belong to
+    /// `other.allocator`. So the only correct route is pair-by-pair:
+    /// drain `other` (its own allocator frees each node as it goes) and
+    /// insert each pair into `self` — `O(other.len() * log(self.len()))`.
+    pub fn append(&mut self, other: &mut Self) {
+        while let Some((k, v)) = other.pop_first() {
+            let _ = self.insert(k, v);
+        }
+    }
 }
 
 impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default, const H: usize> Default
@@ -483,6 +535,25 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M> + Default, const
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// NOT `#[derive(Clone)]`: a derived impl would require `A: Clone` and
+// clone the `root`/`height`/`len` fields verbatim — copying the
+// `root` handle would alias two trees onto the same nodes, and
+// dropping both would double-free. Neither of this crate's allocators
+// (`Slabs`, `Global`) implements `Clone` anyway (an arena's slots
+// aren't safely duplicable); `Default` is the one they both give you.
+// So this clones by CONTENT, through the same bulk-load path
+// `FromIterator` already uses, into a freshly defaulted allocator —
+// not a structural copy of `self`'s node layout. One consequence: the
+// clone is bulk-packed (dense, near-`M`-per-leaf) even if `self` sits
+// at `insert`-built ~2/3 occupancy.
+impl<K: Key + Ord, V: Clone, const M: usize, A: NodeAllocator<K, V, M> + Default, const H: usize>
+    Clone for BPlusTree<K, V, M, A, H>
+{
+    fn clone(&self) -> Self {
+        Self::from_sorted_iter(self.iter().map(|(k, v)| (*k, v.clone())))
     }
 }
 
@@ -494,6 +565,113 @@ where
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+// NOT `#[derive(PartialEq)]`: a derived impl would compare the
+// `root`/`height`/`len`/`allocator` fields directly — `root` is a
+// `NonNull`-bearing handle, so that would compare ADDRESSES, not
+// content (two trees holding identical pairs but built differently —
+// one bulk-loaded, one `insert`-built — would wrongly compare
+// unequal; a moved-then-rebuilt copy of the same logical tree would
+// too). Compares by content instead, in key order, the same shape as
+// `BTreeMap`'s own `PartialEq`.
+//
+// Scoped to identical `A`/`H`: there's no `PartialEq<BPlusTree<K, V,
+// M, A2, H2>>` for a differing allocator type or level cap. That's a
+// default scope call (std has no equivalent extra parameters to
+// choose over), not a hard limitation — additional cross-parameter
+// impls could be added the same way if that's ever wanted.
+impl<K: Key + Ord, V: PartialEq, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    PartialEq for BPlusTree<K, V, M, A, H>
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<K: Key + Ord, V: Eq, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Eq
+    for BPlusTree<K, V, M, A, H>
+{
+}
+
+/// Lexicographic order over the `(key, value)` sequence, matching
+/// [`BTreeMap`](https://doc.rust-lang.org/std/collections/struct.BTreeMap.html)'s
+/// own `PartialOrd`/`Ord`. Same same-`A`/`H`-only scope as `PartialEq`
+/// above.
+// `partial_cmp` can't canonically delegate to `Ord::cmp` (clippy's
+// usual ask): this impl's bound is `V: PartialOrd`, strictly weaker
+// than `Ord`'s `V: Ord` below — `f64` values, say, are `PartialOrd`
+// but not `Ord`, and `Self: Ord` isn't available in that case. `Ord`'s
+// own bound gives it a matching, independent implementation instead —
+// mirroring `BTreeMap`'s own split for exactly this reason.
+#[allow(clippy::non_canonical_partial_ord_impl)]
+impl<K: Key + Ord, V: PartialOrd, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    PartialOrd for BPlusTree<K, V, M, A, H>
+{
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+impl<K: Key + Ord, V: Ord, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> Ord
+    for BPlusTree<K, V, M, A, H>
+{
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+// NOT `#[derive(Hash)]`: a derived impl would hash the `root` handle
+// (an address) alongside `height`/`len`/`allocator` — inconsistent
+// with the content-based `Eq` above (the `Hash`/`Eq` contract demands
+// equal values hash equal, and two content-equal trees can disagree
+// on address, height, and allocator state). Hashes the length, then
+// every pair in key order instead — matching `BTreeMap`'s own `Hash`,
+// and consistent with `Eq` regardless of `A`/`H` or internal shape.
+impl<K, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> core::hash::Hash
+    for BPlusTree<K, V, M, A, H>
+where
+    K: Key + Ord + core::hash::Hash,
+    V: core::hash::Hash,
+{
+    fn hash<Hr: core::hash::Hasher>(&self, state: &mut Hr) {
+        self.len().hash(state);
+        for pair in self.iter() {
+            pair.hash(state);
+        }
+    }
+}
+
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    core::ops::Index<&K> for BPlusTree<K, V, M, A, H>
+{
+    type Output = V;
+
+    /// Panics if `key` is absent — matches
+    /// [`BTreeMap`](https://doc.rust-lang.org/std/collections/struct.BTreeMap.html)'s
+    /// `Index`. Takes `&K` rather than `&Q where K: Borrow<Q>`: this
+    /// crate has no heterogeneous-lookup path yet (see the
+    /// `get`/`get_mut`/`contains_key`/`remove`/`get_key_value`/
+    /// `remove_key_value`/`range`/`range_mut` callsite list) — widen
+    /// this alongside that work if it lands, rather than assuming `&K`
+    /// is final.
+    fn index(&self, key: &K) -> &Self::Output {
+        self.get(key).expect("no entry found for key")
+    }
+}
+
+/// `BTreeMap` deliberately has NO `IndexMut` (`map[k] = v` would be
+/// ambiguous on a missing key: insert, or panic?). This crate adds one
+/// anyway, at the user's request — scoped to the unambiguous half of
+/// that question: panic on a missing key, `&mut V` on a hit, no
+/// implicit insert. Flagging the divergence rather than silently
+/// diverging from std.
+impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    core::ops::IndexMut<&K> for BPlusTree<K, V, M, A, H>
+{
+    fn index_mut(&mut self, key: &K) -> &mut Self::Output {
+        self.get_mut(key).expect("no entry found for key")
     }
 }
 

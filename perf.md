@@ -46,28 +46,29 @@ next 100). Reads are uniform random point lookups.
 
 us vs `std::collections::BTreeMap` vs `sweep_bptree` vs the C++
 incumbents (tlx `btree_map`, ex-STX; absl `btree_map`), u64 keys, 100k
-elements, as of 2026-07-25. UPDATE THIS TABLE on every rerun.
+elements, as of 2026-07-30. UPDATE THIS TABLE on every rerun.
 
 Rust columns are criterion mid estimates. C++ columns come from
 `benches/cpp` (bit-identical key sequences, hand-rolled median-of-25
 with criterion-style untimed setup, Apple clang -O3, both containers
 at their default 256-byte nodes; build/run one-liners in its
-CMakeLists). Same machine, same day, but a different harness —
-cross-language deltas under ~5% are not signal.
+CMakeLists). Same machine, but a different harness and the C++
+columns are from a 2026-07-25 run — cross-language deltas under ~5%
+are not signal.
 
 | bench (100k)                   | beets       | std  | sweep | tlx      | absl     |
 | ------------------------------ | ----------- | ---- | ----- | -------- | -------- |
-| get_hit                        | **1.56 ms** | 5.94 | 2.13  | 4.43     | 5.29     |
-| get_miss                       | **1.63 ms** | 6.02 | 2.11  | 4.38     | 5.24     |
-| insert_sequential              | 3.90 ms     | 3.89 | 2.89  | 3.81     | **2.77** |
-| insert_shuffled                | **5.55 ms** | 6.80 | 8.65  | 8.10     | 6.76     |
-| insert_blocked_local (B=100)   | 4.10 ms     | 4.30 | 4.57  | 3.91     | **3.61** |
-| insert_blocked_strided (B=100) | 5.73 ms     | 6.52 | 7.11  | **5.55** | 6.81     |
-| remove_shuffled                | **5.23 ms** | 7.05 | 8.84  | 9.94     | 6.88     |
-| churn                          | **4.52 ms** | 5.56 | 6.02  | 6.65     | 5.02     |
-| drop (µs, shuffled build)      | **8.6 µs**  | 143  | 48.1  | 106      | 75       |
-| iterate_all (µs)               | **51.1 µs** | 90.8 | 58.3  | 96       | 129      |
-| range_scan (µs, len=100)       | **104 µs**  | 132  | —     | 172      | 139      |
+| get_hit                        | **1.56 ms** | 5.93 | 2.14  | 4.43     | 5.29     |
+| get_miss                       | **1.60 ms** | 6.03 | 2.11  | 4.38     | 5.24     |
+| insert_sequential              | 3.96 ms     | 3.89 | 2.90  | 3.81     | **2.77** |
+| insert_shuffled                | **5.58 ms** | 6.75 | 8.66  | 8.10     | 6.76     |
+| insert_blocked_local (B=100)   | 4.10 ms     | 4.38 | 4.60  | 3.91     | **3.61** |
+| insert_blocked_strided (B=100) | 5.74 ms     | 6.59 | 7.15  | **5.55** | 6.81     |
+| remove_shuffled                | **5.26 ms** | 7.17 | 8.94  | 9.94     | 6.88     |
+| churn                          | **4.53 ms** | 5.56 | 6.08  | 6.65     | 5.02     |
+| drop (µs, shuffled build)      | **8.7 µs**  | 142  | 48.3  | 106      | 75       |
+| iterate_all (µs)               | **50.9 µs** | 91.0 | 57.6  | 96       | 129      |
+| range_scan (µs, len=100)       | **105 µs**  | 131  | —     | 172      | 139      |
 
 - random point reads (half the target workload): a blowout over the
   whole field — ~3.8x vs std, ~1.4x vs sweep, ~2.8x vs tlx (the

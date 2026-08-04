@@ -299,6 +299,58 @@ impl<'a, K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> I
     }
 }
 
+/// An owned iterator producing keys and values. This currently uses a very
+/// naive approach, simply calling [`BPlusTree::pop_first`] repeatedly. This
+/// does unnecessary tree maintenance work.
+///
+/// Future optimization sketch:
+/// - deconstruct the tree
+/// - preserve the root node, len, height
+/// - set a current-leaf pointer to the first leaf
+/// - drain by traversing the leaf links until empty
+/// - when empty, drop the root.
+///
+/// - impl drop to drop the entire tree (same clear_all optimizations when V
+///   needs no drop)
+pub struct IntoIter<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> {
+    tree: BPlusTree<K, V, M, A, H>,
+}
+
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> core::iter::Iterator
+    for IntoIter<K, V, M, A, H>
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.tree.pop_first()
+    }
+}
+
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
+    core::iter::ExactSizeIterator for IntoIter<K, V, M, A, H>
+{
+    fn len(&self) -> usize {
+        self.tree.len
+    }
+}
+
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> core::iter::FusedIterator
+    for IntoIter<K, V, M, A, H>
+{
+}
+
+impl<K: Key, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize> IntoIterator
+    for BPlusTree<K, V, M, A, H>
+{
+    type Item = (K, V);
+
+    type IntoIter = IntoIter<K, V, M, A, H>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { tree: self }
+    }
+}
+
 #[cfg(test)]
 #[path = "../tests/iter.rs"]
 mod tests;

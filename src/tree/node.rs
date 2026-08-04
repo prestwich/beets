@@ -193,6 +193,10 @@ impl<K: Key, V, const M: usize> Node<K, V, M> {
         /// a non-root node deficient, it will trigger rebalancing at the
         /// parent level via [`Inner::rebalance`].
         fn is_deficient(&self) -> bool;
+
+        /// True if this node is at maximum capcity, and may need to split
+        /// at the next insertion.
+        fn is_full(&self) -> bool;
     }
 
     /// Fold `other` — the immediate right sibling of `self` under their

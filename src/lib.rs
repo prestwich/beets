@@ -55,10 +55,13 @@ pub use key::Key;
 
 mod tree;
 pub use tree::BPlusTree;
-pub(crate) use tree::{Inner, Leaf, Node};
+pub(crate) use tree::{FullIterator, Inner, IntoIter, Leaf, Node, Range};
 
 #[cfg(debug_assertions)]
 pub(crate) use tree::NodeKind;
+
+mod set;
+pub use set::BPlusSet;
 
 /// Test utils. Primarily a harness, and methods for asserting invariants about
 /// tree structure.

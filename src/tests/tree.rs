@@ -822,6 +822,8 @@ fn churn_mirrors_btreemap_across_seeds() {
 
 #[cfg(test)]
 use proptest::prelude::*;
+#[cfg(test)]
+use proptest::test_runner::FileFailurePersistence;
 
 #[cfg(test)]
 use crate::harness::{Op, run_differential, wide};
@@ -1300,10 +1302,21 @@ proptest! {
         cases: if cfg!(miri) { 2 } else { 256 },
         // Persistence resolves paths through `getcwd`, which Miri's
         // isolation forbids; regression files are a native-run luxury.
+        //
+        // Pinned to a fixed path rather than the `SourceParallel` default:
+        // this file is attached to the module tree via
+        // `#[path = "../tests/tree.rs"]` in `tree/mod.rs`, so `file!()`
+        // reports the un-normalized `src/tree/../tests/tree.rs`. proptest's
+        // default resolution walks that path looking for a sibling
+        // `lib.rs`/`main.rs` and gets thrown off by the literal `..`,
+        // landing one directory too shallow (`src/tree/proptest-regressions/`
+        // instead of the crate-root `proptest-regressions/`).
         failure_persistence: if cfg!(miri) {
             None
         } else {
-            ProptestConfig::default().failure_persistence
+            Some(Box::new(FileFailurePersistence::Direct(
+                "proptest-regressions/tests/tree.txt",
+            )))
         },
         ..ProptestConfig::default()
     })]
@@ -1405,5 +1418,20 @@ mod height_cap {
         for k in 0..100 {
             tree.insert(crate::harness::wide(k), k);
         }
+    }
+
+    /// `H = 1` admits only a lone root leaf at height 0. `M` pairs fill
+    /// that leaf without splitting it; the very next insert is the one
+    /// that must grow the tree to height 1 — a second level `H = 1`
+    /// has no room for. That specific insert must panic right there,
+    /// not on some other call before or after it.
+    #[test]
+    #[should_panic]
+    fn the_insert_that_outgrows_the_cap_is_the_one_that_panics() {
+        let mut tree: BPlusTree<u64, u64, M, Slabs<u64, u64, M>, 1> = BPlusTree::new();
+        for k in 0..M as u64 {
+            tree.insert(k, v(k));
+        }
+        tree.insert(M as u64, v(M as u64));
     }
 }

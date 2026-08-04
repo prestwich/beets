@@ -8,10 +8,16 @@ use crate::{
 use super::{BPlusTree, Node};
 
 /// The recorded path of one root-to-leaf descent: for each inner level
-/// `h`, `path[h]` holds the visited node and the child index routed
+/// `h`, `nodes[h]` holds the visited node and the child index routed
 /// through. Slots outside the descended range stay uninitialized.
-type TreePath<K, V, const M: usize, const H: usize = DEFAULT_MAX_LEVELS> =
-    [MaybeUninit<(NonNull<Node<K, V, M>>, usize)>; H];
+/// `split_count` holds the number of node splits that would be required to
+/// insert a new key in the leaf.
+struct TreePath<K: Key, V, const M: usize, const H: usize = DEFAULT_MAX_LEVELS> {
+    #[allow(clippy::type_complexity)]
+    nodes: [MaybeUninit<(NonNull<Node<K, V, M>>, usize)>; H],
+    // The number of splits required to insert a key at this path.
+    split_count: u8,
+}
 
 /// One recorded descent for a key: the tree it walked, the
 /// [`path`](Descent::path) it recorded, the leaf it landed at, and the key's
@@ -40,10 +46,12 @@ pub(crate) struct Descent<
     /// (shared, never written) likewise, and the `root` slot only after
     /// the path's last use.
     tree: NonNull<BPlusTree<K, V, M, A, H>>,
+
     /// The recorded path (see [`TreePath`]); slots `1..=tree.height` are
     /// initialized. Private to this module: only the `commit_*` methods
     /// replay it.
     path: TreePath<K, V, M, H>,
+
     /// The leaf the descent landed at.
     pub(crate) leaf: NonNull<Leaf<K, V, M>>,
     /// `key`'s slot in that leaf, per [`Leaf::find_key`]: the match if
@@ -112,6 +120,10 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         let partition = self.partition;
         debug_assert!(!self.exact, "commit_insert requires a vacant descent");
 
+        if self.path.split_count as usize >= H {
+            panic!("tree `H` parameter exceeded. Insert would be too deep for this tree")
+        }
+
         // SAFETY: as the scalar-access note below — the allocator field is
         // disjoint from every recorded pointer's pointee, so this exclusive
         // reference aliases none of the node mutations below. It is also
@@ -143,7 +155,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
         {
             // SAFETY: the descent initialized path slots
             // `1..=tree.height` with valid inner nodes.
-            let (mut node, child_idx) = unsafe { self.path[height + 1].assume_init() };
+            let (mut node, child_idx) = unsafe { self.path.nodes[height + 1].assume_init() };
 
             // SAFETY: node is owned by this tree. We have exclusive access to
             // this tree.
@@ -234,7 +246,7 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
             // `1..=tree.height` with valid inner nodes; height is
             // propagated correctly.
             unsafe {
-                let (mut parent, child_idx) = self.path[height + 1].assume_init();
+                let (mut parent, child_idx) = self.path.nodes[height + 1].assume_init();
                 let parent = parent.as_mut();
                 parent.as_inner_mut().rebalance(height as u8 + 1, child_idx, alloc);
                 deficient = parent.is_deficient(height as u8 + 1);
@@ -290,13 +302,22 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
 
             let idx = f(n);
 
-            path[height].write((node, idx));
+            path.split_count += n.is_full() as u8;
+            path.split_count *= n.is_full() as u8;
+
+            path.nodes[height].write((node, idx));
 
             node = NonNull::from_mut(&mut n.children_mut()[idx]);
 
             height -= 1;
         }
 
+        // SAFETY: node is a leaf, as height is now 0. Node is never null,
+        // and always initialized.
+        unsafe {
+            path.split_count += node.as_ref().is_full(0) as u8;
+            path.split_count *= node.as_ref().is_full(0) as u8;
+        }
         node
     }
 
@@ -321,21 +342,24 @@ impl<K: Key + Ord, V, const M: usize, A: NodeAllocator<K, V, M>, const H: usize>
 
         // Initialize field by field, in place: writing a whole `Descent`
         // value into the slot would be exactly the copy this out-param
-        // exists to avoid. `path` is `MaybeUninit` slots and needs no
-        // writes.
+        // exists to avoid. `path.nodes` is `MaybeUninit` slots and needs
+        // no writes; `path.split_count` is a plain `u8` accumulated via
+        // `+=`/`*=` below, so it must be written before that, same as
+        // every other non-`MaybeUninit` field here.
         let ptr = slot.as_mut_ptr();
         // SAFETY: `ptr` is the caller's `MaybeUninit` slot — the field
         // projections are in bounds, and raw writes into uninitialized
         // storage need no prior validity.
         unsafe {
             (&raw mut (*ptr).tree).write(tree);
+            (&raw mut (*ptr).path.split_count).write(0);
             (&raw mut (*ptr).leaf).write(NonNull::dangling());
             (&raw mut (*ptr).partition).write(0);
             (&raw mut (*ptr).exact).write(false);
         }
-        // SAFETY: every always-initialized field was written above;
-        // `path`'s slots are `MaybeUninit` and carry no validity
-        // requirement.
+        // SAFETY: every always-initialized field was written above,
+        // including `path.split_count`; `path.nodes`'s slots are
+        // `MaybeUninit` and carry no validity requirement.
         let descent = unsafe { slot.assume_init_mut() };
 
         // Re-derive the tree reference from the raw handle the descent

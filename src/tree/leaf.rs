@@ -184,8 +184,14 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     /// must keep ([`Self::MIN_OCCUPANCY`]) — the parent's rebalance
     /// trigger after a remove. The root leaf is exempt and must not be
     /// judged by this.
-    pub(crate) fn is_deficient(&self) -> bool {
+    pub(crate) const fn is_deficient(&self) -> bool {
         self.occupied < Self::MIN_OCCUPANCY
+    }
+
+    /// True if this leaf contains `M` keys and will split at the next
+    /// key insertion.
+    pub(crate) const fn is_full(&self) -> bool {
+        self.occupied == M
     }
 
     /// Set the sibling link. Bulk-load building block (`bulk.rs`): the
@@ -234,6 +240,11 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
         (&self.keys_ref()[idx], &self.vals_ref()[idx])
     }
 
+    /// Get a KV pair by index. Panics if out of range.
+    pub(crate) fn kv_mut_unchecked(&mut self, idx: usize) -> (K, &mut V) {
+        (self.keys_ref()[idx], &mut self.vals_mut()[idx])
+    }
+
     /// Value-only counterpart of [`Self::kv_ref_unchecked`]: the value in
     /// slot `idx`. Panics if out of range.
     #[allow(dead_code)]
@@ -273,13 +284,8 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
     /// Find the first element of the array that is >= key
     #[track_caller]
     pub(crate) fn find_key(&self, key: &K) -> usize {
-        // Branchless linear count (A/B history in perf.md):
-        // the partition point is the number of keys below `key`, so
-        // count them all. No early exit and no data-dependent branch:
-        // the whole prefix is touched, but the loop auto-vectorizes and
-        // nothing mispredicts, which beat the early-exit scan, chunked
-        // hybrids, and (branchless) binary search at every fanout on the
-        // tree-level readout.
+        // Branchless linear count turns out to be cheaper in practice than
+        // binary search or naive loop-and-break due to autovectorization
         self.keys_ref().iter().map(|k| usize::from(k < key)).sum()
     }
 
@@ -358,7 +364,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
         val: V,
         alloc: &mut A,
     ) -> NonNull<Self> {
-        debug_assert_eq!(self.occupied, M);
+        debug_assert!(self.is_full());
         debug_assert!(partition <= M);
 
         let mut right = Self::new(self.next);
@@ -591,7 +597,7 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
         );
 
         // check if full
-        if self.occupied == M {
+        if self.is_full() {
             // Full leaf, split it. Which side the new pair landed on
             // follows the split policy: `partition < LEFT_COUNT` keeps it
             // in `self` at `partition`; otherwise it sits in the new right
@@ -620,6 +626,12 @@ impl<K: Key, V, const M: usize> Leaf<K, V, M> {
             self.insert_unchecked(partition, key, val);
         }
         (NonNull::from(&mut self.vals_mut()[partition]), None)
+    }
+
+    /// Get a reference to a value, if it is present.
+    pub(crate) fn get_kv(&self, key: &K) -> Option<(&K, &V)> {
+        let (partition, exact) = self.probe(key);
+        exact.then(|| (&self.keys_ref()[partition], &self.vals_ref()[partition]))
     }
 
     /// Get a reference to a value, if it is present.

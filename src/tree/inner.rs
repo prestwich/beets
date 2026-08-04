@@ -307,6 +307,12 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         self.child_count < Self::MIN_OCCUPANCY
     }
 
+    /// True if this node contains `M` children and will split at the next
+    /// child insertion.
+    pub(crate) fn is_full(&self) -> bool {
+        self.child_count == M
+    }
+
     pub(crate) fn keys_ref(&self) -> &[K] {
         // SAFETY: `child_count` guarantees initialization
         unsafe { self.keys[..self.key_count()].assume_init_ref() }
@@ -477,10 +483,8 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         // from finding the exact insertion point in the leaf nodes using
         // `<`.
         //
-        // Branchless linear count (A/B history in perf.md),
-        // mirroring `Leaf::find_key`: the child index is the number of
-        // separators at or below `key`. See `find_key` for why this
-        // shape won.
+        // Branchless linear count turns out to be cheaper in practice than
+        // binary search or naive loop-and-break due to autovectorization
         self.keys_ref().iter().map(|existing| usize::from(existing <= key)).sum()
     }
 
@@ -560,7 +564,7 @@ impl<K: Key, V, const M: usize> Inner<K, V, M> {
         child: Node<K, V, M>,
         alloc: &mut A,
     ) -> (K, NonNull<Self>) {
-        debug_assert!(self.child_count == M);
+        debug_assert!(self.is_full());
         debug_assert!(partition <= M);
         debug_assert!(partition == self.child_idx_for_key(&sep));
 

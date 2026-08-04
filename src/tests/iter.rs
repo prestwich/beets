@@ -1,6 +1,6 @@
 //! Contract tests for the iterator family, driven entirely through
 //! the public API (`iter`, `iter_mut`, `iter_mut_from_key`,
-//! `iter_range`, `keys`, `values`, `values_mut`).
+//! `iter_range`, `keys`, `values`, `values_mut`, `into_iter`).
 //!
 //! The shared contract: iteration yields pairs in ascending key
 //! order, exactly the pairs the call promises — all `len()` of them
@@ -8,14 +8,18 @@
 //! whatever shape the tree is in and however it was built. The
 //! mutable iterators additionally promise every yielded `&mut V` is
 //! the pair's real value: writes through it must be visible to
-//! every later read.
+//! every later read. `into_iter` additionally promises that whatever
+//! it hasn't yielded yet is still owned by the tree inside it: it
+//! must be dropped exactly once, whether that's through exhaustion
+//! or through dropping the iterator early.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::ops::Bound;
+use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use crate::{
     BPlusTree,
-    test_util::{M, v},
+    test_util::{Counted, M, v},
 };
 
 /// A tree of `n` pairs grown by scattered inserts, so leaf
@@ -357,4 +361,134 @@ fn range_mut_degenerate_cases_mutate_nothing() {
 
     let mut empty: BPlusTree<u64, u64, M> = BPlusTree::new();
     assert_eq!(empty.range_mut(0..).count(), 0, "an empty tree must yield nothing");
+}
+
+// ── into_iter ───────────────────────────────────────────────────────
+
+/// Consuming a tree by value yields every pair in ascending key
+/// order, exactly `len()` of them — the same order and coverage
+/// `iter()` promises, whatever the tree's shape or how it was built.
+#[test]
+fn into_iter_yields_every_pair_in_ascending_order() {
+    let n = (M * M + 1) as u64;
+    let loaded: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
+
+    for (tree, how) in [(loaded, "bulk-loaded"), (grown(n), "insert-grown")] {
+        let mut expect = 0u64;
+        for (k, val) in tree {
+            assert_eq!(k, expect, "into_iter must visit every key in ascending order ({how})");
+            assert_eq!(val, v(expect), "each key must carry its own value ({how})");
+            expect += 1;
+        }
+        assert_eq!(expect, n, "into_iter must yield exactly len() pairs ({how})");
+    }
+}
+
+/// Consuming an empty tree yields the empty sequence.
+#[test]
+fn into_iter_of_an_empty_tree_yields_nothing() {
+    let tree: BPlusTree<u64, u64, M> = BPlusTree::new();
+    assert_eq!(tree.into_iter().count(), 0, "an empty tree must yield no pairs");
+}
+
+/// `into_iter().len()` must report the pairs REMAINING, per
+/// `ExactSizeIterator`'s contract: full at the start, shrinking as
+/// pairs are consumed, zero at exhaustion.
+#[test]
+fn into_iter_len_reports_the_remaining_pairs() {
+    let n = 2 * M + 1;
+    let tree: BPlusTree<u64, u64, M> =
+        BPlusTree::from_sorted_iter((0..n as u64).map(|k| (k, v(k))));
+
+    let mut it = tree.into_iter();
+    assert_eq!(it.len(), n, "a fresh into_iter's len must be the tree's len");
+    it.next();
+    assert_eq!(it.len(), n - 1, "len must shrink as pairs are consumed");
+    for _ in it.by_ref().take(M) {}
+    assert_eq!(it.len(), n - 1 - M, "len must track consumption across a leaf hop");
+    for _ in it.by_ref() {}
+    assert_eq!(it.len(), 0, "an exhausted into_iter's len must be zero");
+}
+
+/// `into_iter` is fused: it declares `FusedIterator` (the helper's
+/// bound makes that a compile-time check), and an exhausted iterator
+/// keeps returning `None`.
+#[test]
+fn into_iter_is_fused() {
+    fn fused<I: core::iter::FusedIterator>(it: I) -> I {
+        it
+    }
+
+    let n = 2 * M as u64 + 1;
+    let tree: BPlusTree<u64, u64, M> = BPlusTree::from_sorted_iter((0..n).map(|k| (k, v(k))));
+
+    let mut it = fused(tree.into_iter());
+    for _ in it.by_ref() {}
+    assert!(it.next().is_none(), "an exhausted into_iter must stay exhausted");
+    assert!(it.next().is_none(), "and stay that way");
+}
+
+/// Whatever `into_iter` hasn't yielded yet is still owned by the tree
+/// riding inside it: dropping it early — mid-consumption, before
+/// exhaustion — must drop each of those not-yet-yielded values
+/// exactly once. Pairs already taken out are the taker's
+/// responsibility, not the iterator's, so they must be untouched by
+/// that drop.
+#[test]
+fn into_iter_drop_drops_the_unyielded_values_exactly_once() {
+    let n = (M * M + 1) as u64;
+    let live = Arc::new(AtomicIsize::new(0));
+    let mut tree: BPlusTree<u64, Counted, M> = BPlusTree::new();
+    for k in 0..n {
+        tree.insert(k, Counted::new(k, &live));
+    }
+    assert_eq!(live.load(Relaxed), n as isize, "one live value per inserted key");
+
+    let mut it = tree.into_iter();
+    let taken: Vec<(u64, Counted)> = (&mut it).take((n / 3) as usize).collect();
+    assert_eq!(
+        live.load(Relaxed),
+        n as isize,
+        "taking pairs out of the iterator must not itself drop anything"
+    );
+
+    drop(it);
+    assert_eq!(
+        live.load(Relaxed),
+        taken.len() as isize,
+        "dropping a not-yet-exhausted into_iter must drop exactly the values \
+         it hadn't yielded, once each (positive = leak, negative = double-drop)"
+    );
+
+    drop(taken);
+    assert_eq!(live.load(Relaxed), 0, "the values already taken out must drop exactly once too");
+}
+
+/// Fully draining `into_iter` to exhaustion — never dropping it
+/// early — must also drop every value exactly once: the empty tree
+/// left behind still has to fall, and it must fall clean.
+#[test]
+fn into_iter_full_drain_drops_every_value_exactly_once() {
+    let n = (M * M + 1) as u64;
+    let live = Arc::new(AtomicIsize::new(0));
+    let mut tree: BPlusTree<u64, Counted, M> = BPlusTree::new();
+    for k in 0..n {
+        tree.insert(k, Counted::new(k, &live));
+    }
+
+    let drained: Vec<(u64, Counted)> = tree.into_iter().collect();
+    assert_eq!(drained.len(), n as usize, "draining must yield every pair");
+    assert_eq!(
+        live.load(Relaxed),
+        n as isize,
+        "values moved out by a full drain must still be live, held by the collection"
+    );
+
+    drop(drained);
+    assert_eq!(
+        live.load(Relaxed),
+        0,
+        "dropping the drained pairs must drop every value exactly once \
+         (positive = leak, negative = double-drop)"
+    );
 }
