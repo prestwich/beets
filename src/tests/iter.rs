@@ -14,8 +14,10 @@
 //! or through dropping the iterator early.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::ops::Bound;
-use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
+use core::{
+    ops::Bound,
+    sync::atomic::{AtomicIsize, Ordering::Relaxed},
+};
 
 use crate::{
     BPlusTree,

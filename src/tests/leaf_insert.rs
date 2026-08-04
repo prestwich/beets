@@ -17,7 +17,7 @@
 //!   handed back to the caller (who thereby owns its one drop) — and a
 //!   full leaf must not split over a key it already holds.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;

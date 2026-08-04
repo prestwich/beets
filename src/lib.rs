@@ -47,6 +47,12 @@
 
 extern crate alloc;
 
+// The test harness itself needs `std` regardless of the `std` feature —
+// it runs on a host and links it in either way. Without this, `no_std`
+// builds (`--no-default-features`) can't resolve `std::` in test modules.
+#[cfg(test)]
+extern crate std;
+
 mod allocator;
 pub use allocator::{Global, NodeAllocator, Slabs};
 

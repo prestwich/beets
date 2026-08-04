@@ -17,7 +17,7 @@
 //! report instead of whatever a plain run degenerates into, and its leak
 //! checker is the backstop for the "exactly once" half.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;

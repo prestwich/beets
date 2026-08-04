@@ -15,7 +15,7 @@
 //! (`MIN_OCCUPANCY + 1`), so a steal lands both sides exactly at
 //! `MIN_OCCUPANCY`.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use super::*;

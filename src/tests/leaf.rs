@@ -42,7 +42,7 @@
 //! multi-leaf drain meets `MIN_OCCUPANCY`; a lone leaf (the
 //! root-to-be, which is exempt) is passed through unrepaired.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
     cell::RefCell,
     sync::atomic::{AtomicIsize, Ordering::Relaxed},

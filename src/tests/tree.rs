@@ -14,7 +14,7 @@
 //! pairs on the chain, and the chain terminates at the last leaf.
 
 #[cfg(test)]
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 #[cfg(test)]
 use core::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 

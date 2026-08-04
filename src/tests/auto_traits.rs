@@ -9,6 +9,7 @@
 //! `compile_fail` doctests on `BPlusTree` itself.
 
 use crate::common;
+use alloc::string::String;
 
 use crate::{BPlusTree, Global, Slabs};
 use common::{M, fill, v};
