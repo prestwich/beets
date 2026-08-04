@@ -158,25 +158,6 @@ impl<K: Key + Ord, const M: usize, A: NodeAllocator<K, (), M>, const H: usize>
         }
     }
 
-    /// See [`BPlusTree::split_off`] — same fresh-allocator requirement
-    /// and the same reason it isn't a structural `O(log n)` split.
-    pub fn split_off(&mut self, _key: &K) -> Self
-    where
-        A: Default,
-    {
-        todo!("build `Self::new()`, then move every key >= `key` from `self` into it")
-    }
-
-    /// Keep only the keys for which `f` returns `true`, dropping the
-    /// rest. Sets have no values to hand `f` mutable access to, so `f`
-    /// takes just `&K` — matches
-    /// [`BTreeSet::retain`](https://doc.rust-lang.org/std/collections/struct.BTreeSet.html#method.retain).
-    /// See [`BPlusTree::retain`] for why this is a collect-then-remove
-    /// pass rather than a structural in-place walk.
-    pub fn retain<F: FnMut(&K) -> bool>(&mut self, mut _f: F) {
-        todo!("collect keys where `!f(k)` via `iter`, then `remove` each")
-    }
-
     /// Iterate over all keys, in ascending order.
     pub fn iter(&self) -> Iter<FullIterator<'_, K, (), M>> {
         Iter(self.0.iter())
